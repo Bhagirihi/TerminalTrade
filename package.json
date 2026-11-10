@@ -1,0 +1,40 @@
+{
+  "dependencies": {
+    "express": "^4.19.2",
+    "protobufjs": "^7.4.0",
+    "ws": "^8.17.1"
+  },
+  "description": "Realtime NIFTY50 + BANKNIFTY dashboard running Dhruv's Pine Supertrend strategy (ST 10/3.0, EMA-13 dynamic exit, 15:10 square-off) in JavaScript. SIGNALS ONLY - no order placement.",
+  "engines": {
+    "node": ">=18"
+  },
+  "name": "nifty-live-strategy",
+  "private": true,
+  "scripts": {
+    "login": "node tools/upstox-login.js",
+    "replay": "node tools/replay.js",
+    "start": "node src/server.js",
+    "terminal": "node src/server.js --terminal",
+    "trade": "node src/server.js --trade",
+    "phone": "bash tools/run-on-phone.sh",
+    "screen": "node tools/portfolio-screen.js",
+    "portfolio": "npm run dev --prefix portfolio-dashboard",
+    "backtest": "node tools/backtest.js",
+    "test": "node --test test/*.test.js",
+    "muhurat": "node tools/muhurat.js",
+    "muhrat": "node tools/muhurat.js",
+    "muhurat2": "node tools/muhurat2.js",
+    "muhrat2": "node tools/muhurat2.js",
+    "muhurat2:options": "node tools/muhurat2.js --Options",
+    "muhrat2:options": "node tools/muhurat2.js --option",
+    "muhurat:demo": "node tools/muhurat.js --Demo",
+    "muhrat:options": "node tools/muhurat.js --Options",
+    "muhurat:options": "node tools/muhurat.js --Options",
+    "muhrat:regular": "node tools/muhurat.js --Regular",
+    "muhurat:regular": "node tools/muhurat.js --Regular",
+    "muhrat:muhurat": "node tools/muhurat.js --Muhurat",
+    "muhurat:muhurat": "node tools/muhurat.js --Muhurat"
+  },
+  "type": "commonjs",
+  "version": "1.0.0"
+}

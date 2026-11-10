@@ -1,0 +1,516 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0b0e14" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<title>NIFTY / BANKNIFTY — Supertrend Live</title>
+<style>
+  :root { --bg:#0b0e14; --card:#141926; --line:#232a3d; --txt:#e6e9f0; --dim:#8b93a7; --green:#22c55e; --red:#ef4444; --amber:#f59e0b; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt); font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  header { display:flex; flex-wrap:wrap; gap:10px; align-items:center; justify-content:space-between; padding:14px max(18px, env(safe-area-inset-right)) 14px max(18px, env(safe-area-inset-left)); border-bottom:1px solid var(--line); }
+  h1 { font-size:17px; margin:0; font-weight:650; }
+  .badge { font-size:12px; padding:4px 10px; border-radius:999px; border:1px solid var(--line); background:var(--card); }
+  .badge.live { color:var(--green); border-color:var(--green); }
+  .badge.warn { color:var(--amber); border-color:var(--amber); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr)); gap:14px; padding:14px; }
+  .section { padding:0 14px 14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; }
+  .card h2 { margin:0 0 2px; font-size:16px; display:flex; flex-wrap:wrap; gap:4px 12px; justify-content:space-between; align-items:baseline; }
+  .ltp { font-size:26px; font-weight:700; }
+  .up { color:var(--green); } .down { color:var(--red); }
+  .rows { display:grid; grid-template-columns:1fr 1fr; gap:6px 18px; margin:10px 0; font-size:13.5px; }
+  .rows span { color:var(--dim); }
+  .rows b { font-weight:600; text-align:right; }
+  .trend { font-weight:700; }
+  .levels { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin:10px 0 2px; }
+  .lvl { border-radius:8px; padding:7px 10px; background:#10182a; border:1px solid var(--line); min-width:0; }
+  .lvl span { display:block; font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--dim); }
+  .lvl b { display:block; margin-top:2px; font-size:16px; font-weight:750; overflow:hidden; text-overflow:ellipsis; }
+  .lvl.strike { border-color:#3b82f6; background:#172554; }
+  .lvl.strike b { color:#dbeafe; }
+  .lvl.sup { border-color:#06b6d4; background:#083344; }
+  .lvl.sup b { color:#cffafe; }
+  .lvl.res { border-color:#d946ef; background:#3b0764; }
+  .lvl.res b { color:#fae8ff; }
+  .held { background:#1d4ed8; color:#fff; border-radius:5px; padding:1px 6px; }
+  .pos { border-radius:8px; padding:9px 11px; font-size:13.5px; margin:8px 0; background:#1b2334; border:1px solid var(--line); }
+  .lane { margin-top:12px; padding-top:10px; border-top:1px solid var(--line); }
+  .lane h3 { margin:0 0 6px; font-size:13px; font-weight:650; display:flex; justify-content:space-between; gap:8px; }
+  .status-line { margin:6px 0 0; font-size:13.5px; }
+  .pos.long { border-color:var(--green); } .pos.short { border-color:var(--red); }
+  .predict { display:flex; flex-wrap:wrap; gap:4px 10px; align-items:baseline; margin:8px 0 0; padding:8px 10px; border-radius:8px; background:#10182a; border:1px solid var(--line); font-size:13px; }
+  .predict span { color:var(--dim); }
+  .predict b { font-size:14px; }
+  .portfolio { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-top:8px; }
+  .portfolio div { border-radius:8px; padding:8px 10px; background:#10182a; border:1px solid var(--line); }
+  .portfolio span { display:block; font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--dim); }
+  .portfolio b { display:block; margin-top:2px; font-size:20px; font-weight:750; }
+  canvas { width:100%; height:170px; display:block; background:#0e1220; border-radius:8px; }
+  .scroll { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--dim); font-weight:600; }
+  .sig-long { color:var(--green); font-weight:700; } .sig-short { color:var(--red); font-weight:700; }
+  .sig-exit { color:var(--amber); font-weight:700; } .sig-sq { color:#c084fc; font-weight:700; }
+  footer { padding:0 max(18px, env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom)) max(18px, env(safe-area-inset-left)); color:var(--dim); font-size:12px; }
+  @media (max-width: 640px) {
+    h1 { font-size:15px; }
+    .grid { padding:10px; gap:10px; }
+    .section { padding:0 10px 10px; }
+    .card { padding:12px; }
+    .ltp { font-size:22px; }
+    .rows { gap:6px 10px; font-size:13px; }
+    .levels { gap:6px; }
+    .lvl { padding:6px 8px; }
+    .lvl b { font-size:14px; }
+    table { font-size:12px; }
+    th, td { padding:6px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>NIFTY and BANKNIFTY</h1>
+  <div>
+    <span class="badge" id="sourceBadge">connecting…</span>
+    <span class="badge" id="updatedAt"></span>
+  </div>
+</header>
+
+<div class="section" style="padding-top:14px">
+  <div class="card">
+    <h2>Upstox portfolio</h2>
+    <div class="portfolio">
+      <div><span>Total investment</span><b id="portInvest">—</b></div>
+      <div><span>Total P&amp;L</span><b id="portPnl">—</b></div>
+    </div>
+    <p id="portNote" style="color:var(--dim);font-size:12.5px;margin:8px 0 0;">Waiting for Upstox…</p>
+  </div>
+</div>
+
+<div class="grid" id="cards"></div>
+
+<div class="section">
+  <div class="card">
+    <h2>Paper trades <span id="paperTotal" style="font-size:14px;"></span></h2>
+    <p style="color:var(--dim);font-size:12.5px;margin:6px 0 10px;">Simulated from the signals. Nothing is sent to the broker.</p>
+    <div class="scroll">
+    <table>
+      <thead><tr><th>Index</th><th>Strike</th><th>Entry</th><th>Premium in</th><th>Qty</th><th>Invested</th><th>Exit</th><th>Premium out</th><th>Pts</th><th>P&amp;L</th><th>Status</th><th>Why</th><th>Strategy</th></tr></thead>
+      <tbody id="paperBody"><tr><td colspan="13" style="color:var(--dim)">No paper trades yet today.</td></tr></tbody>
+    </table>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="card">
+    <h2>Today's signals</h2>
+    <p style="color:var(--dim);font-size:12.5px;margin:6px 0 10px;">V1 is Supertrend. V2 is the pullback. Both read the same 15-minute candle.</p>
+    <div class="scroll">
+    <table>
+      <thead><tr><th>Time</th><th>Index</th><th>Signal</th><th>Strike</th><th>Premium</th><th>Stop</th><th>Target</th><th>Points</th><th>Why</th><th>Strategy</th></tr></thead>
+      <tbody id="signalsBody"><tr><td colspan="10" style="color:var(--dim)">No signals yet today.</td></tr></tbody>
+    </table>
+    </div>
+  </div>
+</div>
+
+<footer>
+  Signals only. This dashboard never places an order. Both strategies use the 15-minute candle and flatten at 15:10.
+</footer>
+
+<script>
+const fmt = (x, d=2) => x == null || Number.isNaN(x) ? '—' : Number(x).toLocaleString('en-IN', {minimumFractionDigits:d, maximumFractionDigits:d});
+const fmtStrike = (strike, right) => strike == null ? '—' : Number(strike).toLocaleString('en-IN', {maximumFractionDigits:0}) + (right ? ' ' + right : '');
+
+function drawChart(canvas, chart) {
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width = canvas.clientWidth * devicePixelRatio;
+  const H = canvas.height = 170 * devicePixelRatio;
+  ctx.clearRect(0, 0, W, H);
+  if (!chart || chart.length < 2) return;
+  const vals = [];
+  for (const p of chart) { vals.push(p.close); if (p.st != null) vals.push(p.st); if (p.ema != null) vals.push(p.ema); }
+  let min = Math.min(...vals), max = Math.max(...vals);
+  const pad = (max - min) * 0.08 || 1; min -= pad; max += pad;
+  const X = i => (i / (chart.length - 1)) * (W - 8) + 4;
+  const Y = v => H - ((v - min) / (max - min)) * (H - 12) - 6;
+  // EMA (yellow-ish)
+  ctx.beginPath(); ctx.strokeStyle = '#eab308'; ctx.lineWidth = 1 * devicePixelRatio;
+  chart.forEach((p, i) => { if (p.ema == null) return; i === 0 ? ctx.moveTo(X(i), Y(p.ema)) : ctx.lineTo(X(i), Y(p.ema)); });
+  ctx.stroke();
+  // Supertrend (segment colour by direction)
+  ctx.lineWidth = 1.6 * devicePixelRatio;
+  for (let i = 1; i < chart.length; i++) {
+    const a = chart[i-1], b = chart[i];
+    if (a.st == null || b.st == null) continue;
+    ctx.beginPath(); ctx.strokeStyle = b.dir < 0 ? '#22c55e' : '#ef4444';
+    ctx.moveTo(X(i-1), Y(a.st)); ctx.lineTo(X(i), Y(b.st)); ctx.stroke();
+  }
+  // Close (white)
+  ctx.beginPath(); ctx.strokeStyle = '#e6e9f0'; ctx.lineWidth = 1.2 * devicePixelRatio;
+  chart.forEach((p, i) => { i === 0 ? ctx.moveTo(X(i), Y(p.close)) : ctx.lineTo(X(i), Y(p.close)); });
+  ctx.stroke();
+}
+
+function currentStrike(id, s) {
+  if (s.atmStrike != null) return s.atmStrike;
+  if (s.ltp == null || Number.isNaN(Number(s.ltp))) return null;
+  const step = id === 'BANKNIFTY' ? 100 : 50;
+  return Math.round(Number(s.ltp) / step) * step;
+}
+
+function levelsHtml(id, s) {
+  const strike = fmtStrike(currentStrike(id, s));
+  return `<div class="levels">
+    <div class="lvl strike"><span>Strike</span><b data-field="atm">${strike}</b></div>
+    <div class="lvl sup"><span>Support</span><b>${fmt(s.support)}</b></div>
+    <div class="lvl res"><span>Resistance</span><b>${fmt(s.resistance)}</b></div>
+  </div>`;
+}
+function predictHtml(s) {
+  const p = s.prediction;
+  if (!p) return '';
+  const cls = p.side === 'CALL' ? 'up' : p.side === 'PUT' ? 'down' : '';
+  const lead = (p.windows || []).find((w) => w.minutes === p.minutes && w.ready);
+  const range = lead ? ' (' + fmt(lead.low) + ' – ' + fmt(lead.high) + ')' : '';
+  const mins = p.minutes || 5;
+  const words = {
+    Bullish: 'leans up, first ' + mins + ' minutes' + range,
+    Bearish: 'leans down, first ' + mins + ' minutes' + range,
+    Inside: 'price is inside the first ' + mins + ' minutes' + range,
+    Waiting: 'not ready yet',
+    'Before open': 'before the open',
+  };
+  return `<div class="predict"><span>Opening</span><b class="${cls}">${words[p.label] || p.label}</b></div>`;
+}
+
+function candleLabel(s) {
+  if (s.liveCandle && s.liveCandle.timeIST) return s.liveCandle.timeIST + ' live';
+  return s.lastCandleTimeIST ? s.lastCandleTimeIST + ' closed' : '—';
+}
+
+function sigClass(type) {
+  if (type === 'BUY CE') return 'sig-long';
+  if (type === 'BUY PE') return 'sig-short';
+  if (type === 'SQOFF') return 'sig-sq';
+  return 'sig-exit';
+}
+
+let lastStructure = '';
+
+function positionHtml(s, lane) {
+  const posField = lane ? `pos-${lane}` : 'pos';
+  const premField = lane ? `premium-${lane}` : 'premium';
+  const ptsField = lane ? `openpts-${lane}` : 'openpts';
+  if (!s.position) return `<div class="pos" data-field="${posField}">No open position</div>`;
+  const p = s.position;
+  const cls = p.side === 'LONG' ? 'long' : 'short';
+  const ptsCls = p.openPoints == null ? '' : p.openPoints >= 0 ? 'up' : 'down';
+  return `<div class="pos ${cls}" data-field="${posField}"><b>${p.label}</b> <b class="held">${fmtStrike(p.strike, p.right)}</b> · now <b data-field="${premField}">${fmt(p.premium)}</b> · stop ${fmt(p.stopLoss)} · trail stop ${fmt(p.trailingStop)} · target ${fmt(p.target)} · trail target ${fmt(p.trailingTarget)} · qty ${p.qty} · open <b class="${ptsCls}" data-field="${ptsField}">${fmt(p.openPoints)} pts</b></div>`;
+}
+
+function friendlyBlock(block) {
+  return String(block || '').replace(/EMA50/g, 'EMA 50').replace(/EMA20/g, 'EMA 20').replace(/EMA9/g, 'EMA 9');
+}
+
+function v2Note(ce) {
+  const d = ce.debug || {};
+  const used = `${d.tradesToday ?? 0} of ${d.maxTradesDay ?? 3} trades today`;
+  if (ce.position) return { cls: '', text: used };
+  if (d.dailyLocked) return { cls: 'down', text: 'Stopped for the day. ' + used + '.' };
+  if (d.block) return { cls: '', text: 'Not a trade. ' + friendlyBlock(d.block) + '. ' + used + '.' };
+  return { cls: 'up', text: 'Ready to buy a call. ' + used + '.' };
+}
+
+function v2Html(ce) {
+  if (!ce) return '';
+  const note = v2Note(ce);
+  const dayCls = ce.dayPoints >= 0 ? 'up' : 'down';
+  return `
+    <div class="lane" data-lane="v2">
+      <h3>V2 · Pullback <span class="${dayCls}">today ${fmt(ce.dayPoints)} pts</span></h3>
+      <div class="rows">
+        <span>EMA 9</span><b>${fmt(ce.emaFast)}</b>
+        <span>EMA 20</span><b>${fmt(ce.emaPB)}</b>
+        <span>EMA 50</span><b>${fmt(ce.emaTrend)}</b>
+        <span>RSI</span><b>${fmt(ce.rsi)}</b>
+        <span>ADX</span><b>${fmt(ce.adx)}</b>
+      </div>
+      ${positionHtml({ position: ce.position }, 'v2')}
+      <p class="status-line ${note.cls}">${note.text}</p>
+    </div>`;
+}
+
+function structureKey(state) {
+  const slim = {};
+  for (const [id, s] of Object.entries(state.symbols || {})) {
+    const p = s.position;
+    const pred = s.prediction;
+    slim[id] = [s.lastCandleTimeIST, s.liveCandle && s.liveCandle.timeIST, s.supertrend, s.direction, s.ema13, s.support, s.resistance, s.dayPoints, p && p.side, p && p.strike, p && p.stopLoss, p && p.trailingStop, p && p.target, p && p.trailingTarget, p && p.entryTimeIST, pred && pred.label, pred && pred.minutes, (pred && pred.windows || []).map((w) => w.bias).join(','), (s.signalsToday || []).map((x) => [x.t, x.type, x.strike, x.premium, x.stopLoss, x.target].join('|')).join(','), (s.chart || []).length];
+  }
+  const fills = (state.paper && state.paper.trades || []).map((t) => [t.indexId, t.entryT, t.status, t.entryPremium, t.exitPremium].join('|')).join(';');
+    const ceSlim = Object.entries(state.ceStrategy || {}).map(([id, ce]) => [id, ce.lastCandleTimeIST, ce.liveCandle && ce.liveCandle.timeIST, ce.dayPoints, ce.position && ce.position.side, ce.position && ce.position.strike, (ce.signalsToday || []).map((x) => [x.t, x.type].join('|')).join(','), ce.debug && ce.debug.block, ce.debug && ce.debug.dailyLocked, ce.debug && ce.debug.tradesToday]);
+  return JSON.stringify([state.status, state.source, state.feed, state.error, slim, fills, ceSlim]);
+}
+
+function paintBadge(state) {
+  const badge = document.getElementById('sourceBadge');
+  const srcNames = { UPSTOX: 'UPSTOX', ANGELONE: 'ANGEL ONE — LIVE', FIXTURE: 'FIXTURE — TEST DATA (not live)' };
+  const label = state.status === 'error'
+    ? ('ERROR: ' + (state.error || ''))
+    : state.feed === 'upstox'
+      ? 'UPSTOX — REALTIME'
+      : (srcNames[state.source] || 'connecting…');
+  badge.textContent = label;
+  badge.className = 'badge' + (state.feed === 'upstox' || state.source === 'UPSTOX' || state.source === 'ANGELONE' ? ' live' : ' warn');
+  document.getElementById('updatedAt').textContent = state.updatedAt ? 'Updated ' + state.updatedAt : '';
+}
+
+function patchPrices(state) {
+  for (const [id, s] of Object.entries(state.symbols || {})) {
+    const card = document.querySelector(`.card[data-symbol="${id}"]`);
+    if (!card) return false;
+    const ltp = card.querySelector('[data-field="ltp"]');
+    const chg = card.querySelector('[data-field="chg"]');
+    const pos = card.querySelector('[data-field="pos"]');
+    if (ltp) {
+      const text = fmt(s.ltp);
+      if (ltp.textContent !== text) ltp.textContent = text;
+    }
+    if (chg) {
+      const cls = s.change == null ? '' : s.change >= 0 ? 'up' : 'down';
+      const text = s.change == null ? '' : (s.change >= 0 ? '+' : '') + fmt(s.change) + ' (' + (s.changePct >= 0 ? '+' : '') + fmt(s.changePct) + '%) today';
+      if (chg.className !== cls) chg.className = cls;
+      if (chg.textContent !== text) chg.textContent = text;
+    }
+    const prem = card.querySelector('[data-field="premium"]');
+    if (prem && s.position) {
+      const text = fmt(s.position.premium);
+      if (prem.textContent !== text) prem.textContent = text;
+    }
+    const ce = (state.ceStrategy || {})[id];
+    const v2 = card.querySelector('[data-lane="v2"]');
+    if (ce && !v2) return false;
+    if (v2 && ce) {
+      const cePrem = v2.querySelector('[data-field="premium-v2"]');
+      if (cePrem && ce.position) {
+        const text = fmt(ce.position.premium);
+        if (cePrem.textContent !== text) cePrem.textContent = text;
+      }
+      const cePts = v2.querySelector('[data-field="openpts-v2"]');
+      const cePos = v2.querySelector('[data-field="pos-v2"]');
+      if (cePts && ce.position) {
+        const text = fmt(ce.position.openPoints) + ' pts';
+        const cls = ce.position.openPoints == null ? '' : ce.position.openPoints >= 0 ? 'up' : 'down';
+        if (cePts.className !== cls) cePts.className = cls;
+        if (cePts.textContent !== text) cePts.textContent = text;
+      } else if (cePos && !ce.position && cePos.textContent !== 'No open position') {
+        cePos.outerHTML = positionHtml({ position: null }, 'v2');
+      }
+    }
+    const atm = card.querySelector('[data-field="atm"]');
+    if (atm) {
+      const text = fmtStrike(currentStrike(id, s));
+      if (atm.textContent !== text) atm.textContent = text;
+    }
+    const candle = card.querySelector('[data-field="candle"]');
+    if (candle) {
+      const text = candleLabel(s);
+      if (candle.textContent !== text) candle.textContent = text;
+    }
+    const openPts = card.querySelector('[data-field="openpts"]');
+    if (openPts && s.position) {
+      const text = fmt(s.position.openPoints) + ' pts';
+      const cls = s.position.openPoints == null ? '' : s.position.openPoints >= 0 ? 'up' : 'down';
+      if (openPts.className !== cls) openPts.className = cls;
+      if (openPts.textContent !== text) openPts.textContent = text;
+    } else if (pos && !s.position) {
+      pos.outerHTML = positionHtml(s);
+    }
+  }
+  return true;
+}
+
+function invested(t) {
+  if (t.investment != null && Number.isFinite(Number(t.investment))) return Number(t.investment);
+  if (t.entryPremium == null || t.qty == null) return null;
+  const n = Number(t.entryPremium) * Number(t.qty);
+  return Number.isFinite(n) ? Math.round(n * 100) / 100 : null;
+}
+
+function money(n) {
+  if (n == null || Number.isNaN(n)) return '—';
+  const sign = n > 0 ? '+' : '';
+  return sign + fmt(n);
+}
+
+function stratMoney(trades, name) {
+  const rows = (trades || []).filter((t) => !name || t.strategy === name);
+  if (!rows.some((t) => t.pnl != null)) return null;
+  return rows.reduce((a, t) => a + (t.pnl || 0), 0);
+}
+
+function paperHeadline(paper) {
+  if (!paper || !paper.trades || !paper.trades.length) return { text: '', cls: '' };
+  if (paper.total == null) {
+    const n = paper.unpriced || paper.trades.length;
+    return { text: `premium pending (${n})`, cls: '' };
+  }
+  const bits = [];
+  const hasV1 = paper.trades.some((t) => t.strategy === 'Supertrend');
+  const hasV2 = paper.trades.some((t) => t.strategy === 'CE v3');
+  if (hasV1 && hasV2) {
+    const v1 = stratMoney(paper.trades, 'Supertrend');
+    const v2 = stratMoney(paper.trades, 'CE v3');
+    bits.push('V1 ' + (v1 == null ? 'premium pending' : money(v1)));
+    bits.push('V2 ' + (v2 == null ? 'premium pending' : money(v2)));
+  }
+  const pending = paper.unpriced ? ` · ${paper.unpriced} unpriced` : '';
+  const text = (bits.length ? bits.join(' · ') + ' · total ' : '') + money(paper.total) + pending;
+  return { text, cls: paper.total >= 0 ? 'up' : 'down' };
+}
+
+function patchPaper(state) {
+  const paper = state.paper;
+  if (!paper) return;
+  const total = document.getElementById('paperTotal');
+  if (total) {
+    const head = paperHeadline(paper);
+    total.className = head.cls;
+    total.textContent = head.text;
+  }
+  for (const t of paper.trades || []) {
+    if (t.status !== 'OPEN') continue;
+    const row = document.querySelector(`tr[data-paper-row="${t.indexId}"]`);
+    if (!row) continue;
+    const mark = row.querySelector('[data-field="mark"]');
+    const pnl = row.querySelector('[data-field="pnl"]');
+    const pts = row.querySelector('[data-field="pts"]');
+    if (mark) mark.textContent = fmt(t.markPremium);
+    if (pts) pts.textContent = t.premiumPoints == null ? '—' : fmt(t.premiumPoints);
+    if (pnl) {
+      pnl.textContent = money(t.pnl);
+      pnl.className = t.pnl == null ? '' : t.pnl >= 0 ? 'up' : 'down';
+    }
+  }
+}
+
+function renderPaper(state) {
+  const paper = state.paper || { trades: [] };
+  const total = document.getElementById('paperTotal');
+  if (total) {
+    const head = paperHeadline(paper);
+    total.className = head.cls;
+    total.textContent = head.text;
+  }
+  const body = document.getElementById('paperBody');
+  const rows = paper.trades || [];
+  body.innerHTML = rows.length ? '' : '<tr><td colspan="13" style="color:var(--dim)">No paper trades yet today.</td></tr>';
+  for (const t of rows) {
+    const tr = document.createElement('tr');
+    if (t.status === 'OPEN') tr.dataset.paperRow = t.indexId;
+    const pnlCls = t.pnl == null ? '' : t.pnl >= 0 ? 'up' : 'down';
+    const exitPx = t.status === 'OPEN' ? `<span data-field="mark">${fmt(t.markPremium)}</span>` : fmt(t.exitPremium);
+    const why = t.status === 'OPEN' ? (t.entryReason || '—') : (t.exitReason || '—');
+    const strat = t.strategy === 'CE v3' ? 'V2 Pullback' : 'V1 Supertrend';
+    const entryAt = t.entryAt || t.entryTime || '—';
+    const exitAt = t.status === 'OPEN' ? '—' : (t.exitAt || t.exitTime || '—');
+    tr.innerHTML = `<td>${t.index}</td><td>${fmtStrike(t.strike, t.right)}</td><td>${entryAt}</td><td>${fmt(t.entryPremium)}</td><td>${t.qty == null ? '—' : t.qty}</td><td>${fmt(invested(t))}</td><td>${exitAt}</td><td>${exitPx}</td><td data-field="pts">${t.premiumPoints == null ? '—' : fmt(t.premiumPoints)}</td><td class="${pnlCls}" data-field="pnl">${money(t.pnl)}</td><td class="${t.status === 'OPEN' ? 'sig-long' : 'sig-exit'}">${t.status === 'OPEN' ? 'OPEN' : 'CLOSED'}</td><td>${why}</td><td>${strat}</td>`;
+    body.appendChild(tr);
+  }
+}
+
+function paintPortfolio(state) {
+  const book = state && state.portfolio;
+  const inv = document.getElementById('portInvest');
+  const pnl = document.getElementById('portPnl');
+  const note = document.getElementById('portNote');
+  if (!inv || !pnl) return;
+  if (!book || book.error || book.investment == null) {
+    inv.textContent = '—';
+    pnl.textContent = '—';
+    pnl.className = '';
+    if (note) note.textContent = book && book.error ? book.error : 'Waiting for Upstox…';
+    return;
+  }
+  inv.textContent = fmt(book.investment);
+  const pct = book.investment ? ` (${book.pnl >= 0 ? '+' : ''}${(book.pnl / book.investment * 100).toFixed(2)}%)` : '';
+  pnl.textContent = money(book.pnl) + pct;
+  pnl.className = book.pnl >= 0 ? 'up' : 'down';
+  const parts = [book.live ? '● LIVE' : '○ poll'];
+  if (book.holdings) parts.push(book.holdings + (book.holdings === 1 ? ' holding' : ' holdings'));
+  if (book.positions) parts.push(book.positions + (book.positions === 1 ? ' open position' : ' open positions'));
+  if (note) note.textContent = parts.length ? parts.join(' · ') : 'No holdings or open positions.';
+}
+
+function render(state) {
+  paintBadge(state);
+  paintPortfolio(state);
+  const key = structureKey(state);
+  if (key === lastStructure && patchPrices(state)) {
+    patchPaper(state);
+    return;
+  }
+  lastStructure = key;
+
+  const wrap = document.getElementById('cards');
+  wrap.innerHTML = '';
+  const allSignals = [];
+  for (const [id, s] of Object.entries(state.symbols || {})) {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.dataset.symbol = id;
+    const chgCls = s.change == null ? '' : s.change >= 0 ? 'up' : 'down';
+    const trendTxt = s.direction == null ? '—' : s.direction < 0 ? '<span class="trend up">BULLISH</span>' : '<span class="trend down">BEARISH</span>';
+    card.innerHTML = `
+      <h2>${s.name} <span class="ltp" data-field="ltp">${fmt(s.ltp)}</span></h2>
+      <div data-field="chg" class="${chgCls}" style="font-size:13px;">${s.change == null ? '' : (s.change >= 0 ? '+' : '') + fmt(s.change) + ' (' + (s.changePct >= 0 ? '+' : '') + fmt(s.changePct) + '%) today'}</div>
+      ${levelsHtml(id, s)}
+      ${predictHtml(s)}
+      <div class="lane">
+        <h3>V1 · Supertrend <span class="${s.dayPoints >= 0 ? 'up' : 'down'}">today ${fmt(s.dayPoints)} pts</span></h3>
+        <div class="rows">
+          <span>Supertrend</span><b>${fmt(s.supertrend)}</b>
+          <span>Trend</span><b>${trendTxt}</b>
+          <span>EMA 13</span><b>${fmt(s.ema13)}</b>
+          <span>Candle</span><b data-field="candle">${candleLabel(s)}</b>
+        </div>
+        ${positionHtml(s)}
+      </div>
+      ${v2Html((state.ceStrategy || {})[id])}
+      <canvas></canvas>`;
+    wrap.appendChild(card);
+    drawChart(card.querySelector('canvas'), s.chart);
+    for (const sig of s.signalsToday || []) allSignals.push({ ...sig, index: s.name });
+    const ce = (state.ceStrategy || {})[id];
+    for (const sig of (ce && ce.signalsToday) || []) allSignals.push({ ...sig, index: s.name });
+  }
+  allSignals.sort((a, b) => a.t - b.t);
+  const body = document.getElementById('signalsBody');
+  body.innerHTML = allSignals.length ? '' : '<tr><td colspan="10" style="color:var(--dim)">No signals yet today.</td></tr>';
+  for (const sig of allSignals) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${sig.timeIST}</td><td>${sig.index}</td><td class="${sigClass(sig.type)}">${sig.type}</td><td>${fmtStrike(sig.strike, sig.right)}</td><td>${fmt(sig.premium)}</td><td>${fmt(sig.stopLoss)}</td><td>${fmt(sig.target)}</td><td>${sig.points == null ? '—' : fmt(sig.points)}</td><td>${sig.reason || '—'}</td><td>${sig.strategy === 'CE v3' ? 'V2 Pullback' : 'V1 Supertrend'}</td>`;
+    body.appendChild(tr);
+  }
+  renderPaper(state);
+}
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}`);
+  ws.onmessage = (ev) => { const m = JSON.parse(ev.data); if (m.type === 'state') render(m.state); };
+  ws.onclose = () => setTimeout(connect, 3000);
+  ws.onerror = () => ws.close();
+}
+connect();
+setInterval(() => fetch('/api/state').then(r => r.json()).then(render).catch(() => {}), 15000);
+</script>
+</body>
+</html>

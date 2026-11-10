@@ -1,0 +1,38 @@
+syntax = "proto3";
+package com.upstox.marketdatafeederv3udapi.rpc.proto;
+
+// Subset of Upstox Market Data Feed V3. Field numbers match the official proto.
+// Unknown fields (depth, greeks, auction) are skipped.
+
+message LTPC {
+  double ltp = 1;
+  int64 ltt = 2;
+  int64 ltq = 3;
+  double cp = 4;
+}
+
+message IndexFullFeed {
+  LTPC ltpc = 1;
+}
+
+message MarketFullFeed {
+  LTPC ltpc = 1;
+}
+
+message FullFeed {
+  oneof FullFeedUnion {
+    MarketFullFeed marketFF = 1;
+    IndexFullFeed indexFF = 2;
+  }
+}
+
+message Feed {
+  oneof FeedUnion {
+    LTPC ltpc = 1;
+    FullFeed fullFeed = 2;
+  }
+}
+
+message FeedResponse {
+  map<string, Feed> feeds = 2;
+}
