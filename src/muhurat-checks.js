@@ -46,6 +46,21 @@ async function checkEnv() {
   return rows;
 }
 
+function isRateLimitError(err) {
+  const msg = String((err && err.message) || err || '');
+  return (
+    msg.includes('429')
+    || msg.includes('UDAPI10005')
+    || /Too Many Request/i.test(msg)
+    || msg.includes('error-1015')
+    || /rate limit/i.test(msg)
+  );
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function checkUpstox() {
   const rows = [];
   if (!config.upstox.accessToken) return rows;
@@ -66,8 +81,14 @@ async function checkUpstox() {
       rows.push(ok('BOOK_LOSS', `No book loss % yet · block new trades at −${limit}% (near 20%)`));
     }
   } catch (e) {
-    rows.push(fail('UPSTOX_PORTFOLIO', e.message.slice(0, 140)));
+    if (isRateLimitError(e)) {
+      rows.push(warn('UPSTOX_PORTFOLIO', `Rate limited — ${e.message.slice(0, 100)} · wait ~1 min / stop other bots`));
+    } else {
+      rows.push(fail('UPSTOX_PORTFOLIO', e.message.slice(0, 140)));
+    }
   }
+  // Space market-data probes; Upstox + Cloudflare 1015 trip if we burst after portfolio.
+  await sleep(800);
   const keys = allInstrumentKeys().slice(0, 5);
   try {
     const map = await up.getLtps(keys);
@@ -75,8 +96,14 @@ async function checkUpstox() {
     if (n < 3) rows.push(fail('UPSTOX_LTP', `Only ${n}/5 sample LTPs — token or market data issue`));
     else rows.push(ok('UPSTOX_LTP', `LTP ok (${n}/5 sample names)`));
   } catch (e) {
-    rows.push(fail('UPSTOX_LTP', e.message.slice(0, 140)));
+    // 429 is temporary — warn so a cooled-down feed can still start the session.
+    if (isRateLimitError(e)) {
+      rows.push(warn('UPSTOX_LTP', `Rate limited (429) — wait 1–2 min, run only one muhurat2, then retry. ${e.message.slice(0, 80)}`));
+    } else {
+      rows.push(fail('UPSTOX_LTP', e.message.slice(0, 140)));
+    }
   }
+  await sleep(800);
   try {
     const { istDateKey } = require('./time');
     const to = istDateKey(Date.now());
@@ -89,7 +116,11 @@ async function checkUpstox() {
     if (!candles || candles.length < 20) rows.push(fail('UPSTOX_CANDLES', 'Not enough daily bars for screening'));
     else rows.push(ok('UPSTOX_CANDLES', `${candles.length} daily bars for screening`));
   } catch (e) {
-    rows.push(fail('UPSTOX_CANDLES', e.message.slice(0, 140)));
+    if (isRateLimitError(e)) {
+      rows.push(warn('UPSTOX_CANDLES', `Rate limited (Cloudflare/Upstox) — wait 1–2 min then retry. ${e.message.slice(0, 80)}`));
+    } else {
+      rows.push(fail('UPSTOX_CANDLES', e.message.slice(0, 140)));
+    }
   }
   return rows;
 }

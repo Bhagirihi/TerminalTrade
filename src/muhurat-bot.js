@@ -40,16 +40,22 @@ function budgetOf() {
 }
 
 // Cap = already-spent open positions + Upstox available margin (so leftover cash can buy Watch).
+// When state.budgetLimit is set (merged stocks+options), each bot stays within its own budget.
 function spendCap(book, state) {
   const openSpend = Object.values((state && state.positions) || {}).reduce(
     (s, p) => s + ((p && p.qty > 0 && p.status !== 'CLOSED') ? (Number(p.spend) || 0) : 0),
     0
   );
   const available = Number(book && book.funds && book.funds.available);
+  const limit = Number(state && state.budgetLimit);
+  const configured = Number.isFinite(limit) && limit > 0 ? limit : budgetOf();
   if (Number.isFinite(available) && available >= 0) {
+    if (Number.isFinite(limit) && limit > 0) {
+      return Math.min(openSpend + available, configured);
+    }
     return openSpend + available;
   }
-  return budgetOf();
+  return configured;
 }
 
 // Near 20% book loss → do not open new trades (default block at 18%).
@@ -480,10 +486,11 @@ async function squareOffAll(provider, state, product) {
   state.squaredOff = true;
 }
 
-function createMuhuratBot(provider, { mode = 'equity' } = {}) {
+function createMuhuratBot(provider, { mode = 'equity', budget, enforceBudget = false } = {}) {
   if (!liveEnabled()) return null;
   const product = productOf();
   const botMode = mode === 'options' ? 'options' : 'equity';
+  const budgetLimit = Number(budget) > 0 ? Math.floor(Number(budget)) : budgetOf();
   let busy = false;
 
   return {
@@ -491,7 +498,7 @@ function createMuhuratBot(provider, { mode = 'equity' } = {}) {
     live: true,
     product,
     mode: botMode,
-    budget: budgetOf(),
+    budget: budgetLimit,
     async tick(book, ltpByKey = new Map()) {
       const modeNow = bookModeOf(book && book.mode ? book : botMode);
       if (busy) return viewOf(loadState(istDateKey(Date.now()), modeNow), sessionPhase());
@@ -501,6 +508,8 @@ function createMuhuratBot(provider, { mode = 'equity' } = {}) {
       const phase = sessionPhase(now);
       const state = loadState(day, modeNow);
       state.bookMode = modeNow;
+      if (enforceBudget) state.budgetLimit = budgetLimit;
+      else delete state.budgetLimit;
       try {
         if (phase.phase === 'exit_only' || phase.phase === 'closed') {
           await squareOffAll(provider, state, product);

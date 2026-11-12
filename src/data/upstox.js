@@ -31,6 +31,47 @@ function getIpv4Dispatcher() {
   return ipv4Dispatcher;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRateLimited(status, body) {
+  if (status === 429) return true;
+  const text = String(body || '');
+  return (
+    text.includes('UDAPI10005')
+    || /Too Many Request/i.test(text)
+    || text.includes('error-1015')
+    || /rate limit/i.test(text)
+  );
+}
+
+function retryAfterMs(res, attempt) {
+  const header = res && res.headers && res.headers.get && res.headers.get('retry-after');
+  const sec = header != null ? Number(header) : NaN;
+  if (Number.isFinite(sec) && sec > 0) return Math.min(60_000, Math.ceil(sec * 1000));
+  // 2s, 5s, 12s, 25s — Cloudflare 1015 needs a real pause.
+  return Math.min(30_000, Math.round(2000 * (2.2 ** attempt)));
+}
+
+// Process-wide pace: one Upstox HTTP call at a time, min gap between starts.
+// Stops two bots / book refresh + LTP poll from stampeding into 429.
+const MIN_GAP_MS = Math.max(200, Number(process.env.UPSTOX_MIN_GAP_MS) || 400);
+let gate = Promise.resolve();
+let nextSlotAt = 0;
+
+function scheduleUpstoxCall(run) {
+  const job = gate.then(async () => {
+    const wait = Math.max(0, nextSlotAt - Date.now());
+    if (wait > 0) await sleep(wait);
+    nextSlotAt = Date.now() + MIN_GAP_MS;
+    return run();
+  });
+  // Keep the chain alive even if one call fails.
+  gate = job.then(() => {}, () => {});
+  return job;
+}
+
 class UpstoxProvider {
   constructor(accessToken) {
     this.name = 'UPSTOX';
@@ -42,19 +83,35 @@ class UpstoxProvider {
   }
 
   async fetchJson(url, opts = {}) {
-    const dispatcher = getIpv4Dispatcher();
-    const res = await fetch(url, {
-      method: opts.method || 'GET',
-      headers: {
-        ...this.headers(),
-        ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
-      },
-      body: opts.body != null ? JSON.stringify(opts.body) : undefined,
-      signal: AbortSignal.timeout(config.requestTimeoutMs),
-      ...(dispatcher ? { dispatcher } : {}),
+    const maxAttempts = Math.max(1, Number(opts.retries != null ? opts.retries : 4));
+    return scheduleUpstoxCall(async () => {
+      let lastErr = null;
+      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        const dispatcher = getIpv4Dispatcher();
+        const res = await fetch(url, {
+          method: opts.method || 'GET',
+          headers: {
+            ...this.headers(),
+            ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
+          },
+          body: opts.body != null ? JSON.stringify(opts.body) : undefined,
+          signal: AbortSignal.timeout(config.requestTimeoutMs),
+          ...(dispatcher ? { dispatcher } : {}),
+        });
+        if (res.ok) return res.json();
+        const body = await res.text().then((t) => t.slice(0, 240));
+        lastErr = new Error(`Upstox ${res.status}: ${body}`);
+        if (isRateLimited(res.status, body) && attempt < maxAttempts - 1) {
+          const pause = retryAfterMs(res, attempt);
+          await sleep(pause);
+          // Push the shared slot out so other callers also cool down.
+          nextSlotAt = Math.max(nextSlotAt, Date.now() + MIN_GAP_MS);
+          continue;
+        }
+        throw lastErr;
+      }
+      throw lastErr || new Error('Upstox request failed');
     });
-    if (!res.ok) throw new Error(`Upstox ${res.status}: ${await res.text().then((t) => t.slice(0, 200))}`);
-    return res.json();
   }
 
   // Live equity orders (real money when called). Product: I=intraday, D=delivery.

@@ -16,6 +16,56 @@ const { UpstoxFeed } = require('../src/data/upstox-feed');
 const { summarizePortfolio, summarizeLive } = require('../src/portfolio');
 const { demoChecks, buildDemoState } = require('../src/muhurat-demo');
 
+function isBothArg() {
+  // Supports: --both / --all / Both, plus MUHURAT_MODE=both (muhurat2 default).
+  if (
+    process.env.npm_config_both === 'true' ||
+    process.env.npm_config_all === 'true' ||
+    process.env.MUHURAT_MODE === 'both' ||
+    process.env.MUHURAT_MODE === 'all'
+  ) {
+    return true;
+  }
+  return process.argv.some((a) => {
+    const s = String(a);
+    return (
+      s === '--both' ||
+      s === '--Both' ||
+      s === '--all' ||
+      s === '--All' ||
+      s === 'both' ||
+      s === 'Both' ||
+      s === 'all' ||
+      s === 'All' ||
+      /^--?(both|all)$/i.test(s)
+    );
+  });
+}
+
+function isStocksOnlyArg() {
+  // Force equity-only when combined default is on: --stocks / --equity.
+  if (
+    process.env.npm_config_stocks === 'true' ||
+    process.env.npm_config_equity === 'true' ||
+    process.env.MUHURAT_MODE === 'equity' ||
+    process.env.MUHURAT_MODE === 'stocks'
+  ) {
+    return true;
+  }
+  return process.argv.some((a) => {
+    const s = String(a);
+    return (
+      s === '--stocks' ||
+      s === '--Stocks' ||
+      s === '--equity' ||
+      s === '--Equity' ||
+      s === 'stocks' ||
+      s === 'equity' ||
+      /^--?(stocks|equity)$/i.test(s)
+    );
+  });
+}
+
 function isOptionsArg() {
   // Supports: --Options / --options / --option / Options, plus `npm run muhrat2 -- --option`.
   if (
@@ -38,6 +88,15 @@ function isOptionsArg() {
       /^--?Options?$/i.test(s)
     );
   });
+}
+
+/** Resolve run mode: both | options | equity. --Options / --stocks win over --both. */
+function resolveRunMode(opts = {}) {
+  if (opts.mode === 'both' || opts.mode === 'options' || opts.mode === 'equity') return opts.mode;
+  if (isOptionsArg()) return 'options';
+  if (isStocksOnlyArg()) return 'equity';
+  if (isBothArg()) return 'both';
+  return 'equity';
 }
 
 function portfolioKeysOf(rows) {
@@ -256,28 +315,91 @@ function section(title, rows, width) {
   return [bold(title), ...placeBoxes(rows, width)];
 }
 
-function render(state, opts = {}) {
+/** Manual cues when auto orders fail (static IP / 403) or for watch-only. */
+function userSignalLines(book, bot, phase, width) {
+  const lines = [];
+  const phaseInfo = (book && book.phase) || phase || {};
+  const lossGate = (bot && bot.lossGate) || (book && book.lossGate);
+  const buyBlocked = lossGate && lossGate.blocked;
+
+  const buys = [];
+  const seenBuy = new Set();
+  if (!buyBlocked && phaseInfo.canDecideBuy !== false) {
+    for (const r of (book && book.liveBuys) || []) {
+      if (!r || !r.ticker) continue;
+      if (r.verdict !== 'BUY') continue;
+      if (!(Number(r.profitScore) > 12)) continue;
+      if (!(r.qty > 0)) continue;
+      if (r.orderReady === false) continue;
+      if (seenBuy.has(r.ticker)) continue;
+      seenBuy.add(r.ticker);
+      buys.push(r.ticker);
+    }
+  }
+
+  const sells = [];
+  const seenSell = new Set();
+  const pushSell = (ticker) => {
+    if (!ticker || seenSell.has(ticker)) return;
+    seenSell.add(ticker);
+    sells.push(ticker);
+  };
+  const exitOnly = phaseInfo.phase === 'exit_only' || phaseInfo.phase === 'closed';
+  for (const p of (bot && bot.positions) || []) {
+    if (!p || !p.ticker || !(p.qty > 0)) continue;
+    const last = Number(p.last);
+    const stop = Number(p.stop);
+    const t2 = Number(p.t2);
+    if (exitOnly) pushSell(p.ticker);
+    else if (Number.isFinite(last) && Number.isFinite(stop) && last <= stop) pushSell(p.ticker);
+    else if (Number.isFinite(last) && Number.isFinite(t2) && last >= t2) pushSell(p.ticker);
+  }
+  // If auto BUY failed (IP / 403), still surface the name from recent bot errors/logs.
+  if (!buyBlocked) {
+    const err = String((bot && bot.lastError) || '');
+    const m = err.match(/^BUY\s+([A-Z0-9 .&-]+)\s*:/i);
+    if (m && m[1] && !seenBuy.has(m[1].trim())) {
+      const t = m[1].trim();
+      seenBuy.add(t);
+      buys.unshift(t);
+    }
+  }
+
+  if (!buys.length && !sells.length) return lines;
+  lines.push(bold('USER SIGNALS') + dim(' · place manually if auto order blocked'));
+  for (const t of buys.slice(0, 8)) {
+    lines.push(clip(green(bold(`BUY(USER) ==> ${t}`)), width));
+  }
+  for (const t of sells.slice(0, 8)) {
+    lines.push(clip(red(bold(`SELL(USER) ==> ${t}`)), width));
+  }
+  return lines;
+}
+
+function renderBookPanel(state, opts = {}) {
   const width = opts.width || 100;
-  const height = opts.height || 40;
-  const fill = opts.fill !== false;
   const book = (state && state.book) || {};
   const lines = [];
   const phase = book.phase || {};
   const optionsMode = book.mode === 'options' || (state && state.mode === 'options');
+  const title = opts.panelTitle
+    || (optionsMode ? 'Muhurat Options' : 'Muhurat');
   lines.push(clip(
-    bold(optionsMode ? 'Muhurat Options' : 'Muhurat') +
+    bold(title) +
       '  ' + dim(optionsMode ? 'NIFTY + BANKNIFTY ATM CE/PE · ' + SESSION.label : SESSION.label) +
       '  ' + dim(`${book.asOf || '—'} · ${book.screened || 0} names · ${state && state.updatedAt ? state.updatedAt : ''}`),
     width
   ));
-  if (state && state.error) lines.push(clip(red(state.error), width));
+  if (state && state.error && !opts.hideSharedError) lines.push(clip(red(state.error), width));
   const feedLabel = state && state.feed === 'live' ? green('FEED LIVE') : state && state.feed === 'poll' ? amber('FEED POLL') : dim('FEED —');
-  lines.push(clip(
-    (phase.canDecideBuy ? green : amber)(
-      phase.message || 'No BUY decision until market open review'
-    ) + dim(phase.clock ? ` · now ${phase.clock}` : '') + '  ' + feedLabel,
-    width
-  ));
+  if (!opts.hideFeedPhase) {
+    lines.push(clip(
+      (phase.canDecideBuy ? green : amber)(
+        phase.message || 'No BUY decision until market open review'
+      ) + dim(phase.clock ? ` · now ${phase.clock}` : '') + '  ' + feedLabel,
+      width
+    ));
+  }
   if (optionsMode && (book.indexes || []).length) {
     const bits = (book.indexes || []).map((ix) => {
       if (!ix || ix.error) return `${ix && ix.indexId ? ix.indexId : '?'} err`;
@@ -371,6 +493,8 @@ function render(state, opts = {}) {
   } else {
     lines.push(clip(dim('Auto off — signals only. Trail: stock +2.5%→+1.5% then +1% · options +5%→cost then +10%/+5% · exit 3:15'), width));
   }
+
+  lines.push(...userSignalLines(book, state && state.bot, phase, width));
 
   const byPDesc = (a, b) => (Number(b.profitScore) || -99) - (Number(a.profitScore) || -99);
   const gainerTickerSet = new Set(
@@ -472,22 +596,69 @@ function render(state, opts = {}) {
     }
   }
 
-  lines.push(clip(dim('Hold above open 5–10m → buy · book T1 · exit T2 or 3:15 · q quit'), width));
+  if (!opts.hideFooter) {
+    lines.push(clip(dim('Hold above open 5–10m → buy · book T1 · exit T2 or 3:15 · q quit'), width));
+  }
   if (opts.log) lines.push(clip(dim(opts.log), width));
+  return lines;
+}
+
+function render(state, opts = {}) {
+  const width = opts.width || 100;
+  const height = opts.height || 40;
+  const fill = opts.fill !== false;
+  const both = (state && state.mode === 'both') || (opts.mode === 'both');
+
+  let lines;
+  if (both) {
+    const sharedError = state && state.error ? [clip(red(state.error), width)] : [];
+    const feedLabel = state && state.feed === 'live' ? green('FEED LIVE') : state && state.feed === 'poll' ? amber('FEED POLL') : dim('FEED —');
+    const header = [
+      clip(
+        bold('Muhurat') + dim('  stocks + options · one process · separate budgets  ') + feedLabel +
+          dim(state && state.updatedAt ? ` · ${state.updatedAt}` : ''),
+        width
+      ),
+      ...sharedError,
+    ];
+    const stockLines = renderBookPanel(
+      { ...state, mode: 'equity', book: state.book || {}, bot: state.bot, error: '' },
+      { width, panelTitle: 'Stocks', hideSharedError: true, hideFeedPhase: false, hideFooter: true }
+    );
+    const optLines = renderBookPanel(
+      { ...state, mode: 'options', book: state.optionsBook || {}, bot: state.optionsBot, error: '' },
+      { width, panelTitle: 'Options', hideSharedError: true, hideFeedPhase: true, hideFooter: true }
+    );
+    lines = [
+      ...header,
+      ...stockLines,
+      clip(dim('─'.repeat(Math.min(width, 48))), width),
+      ...optLines,
+      clip(dim('Hold above open 5–10m → buy · separate stock/options budgets · exit 3:15 · q quit'), width),
+    ];
+  } else {
+    lines = renderBookPanel(state, { width, log: opts.log });
+  }
 
   if (fill) while (lines.length < height) lines.push('');
   return lines.slice(0, fill ? height : lines.length).map((l) => pad(clip(l, width), width)).join('\n');
 }
 
-async function resolveLiveBudget(provider) {
-  const configured = Number(process.env.MUHURAT_BUDGET || 20000);
-  let funds = null;
-  try {
-    if (provider && typeof provider.getFunds === 'function') funds = await provider.getFunds();
-  } catch (_) {
-    funds = null;
+async function resolveLiveBudget(provider, { budget, money } = {}) {
+  let funds = money && money.funds != null ? money.funds : null;
+  let available = money && money.available != null ? money.available : null;
+  if (!money) {
+    try {
+      if (provider && typeof provider.getFunds === 'function') funds = await provider.getFunds();
+    } catch (_) {
+      funds = null;
+    }
+    available = funds && Number.isFinite(Number(funds.available)) ? Number(funds.available) : null;
   }
-  const available = funds && Number.isFinite(Number(funds.available)) ? Number(funds.available) : null;
+  const configured = Number(
+    budget != null ? budget
+      : process.env.MUHURAT_BUDGET || 20000
+  );
   return {
     funds,
     budget: configured > 0 ? configured : 20000,
@@ -495,36 +666,21 @@ async function resolveLiveBudget(provider) {
   };
 }
 
-async function fetchBook(provider, { mode = 'equity', stickyTickers = [] } = {}) {
-  const to = istDateKey(Date.now());
-  const from = shiftDate(to, -120);
-  const money = await resolveLiveBudget(provider);
-  const book = mode === 'options'
-    ? await buildMuhuratOptionsBook(provider, {
-      fromDate: from,
-      toDate: to,
-      budget: money.budget,
-      availableMargin: money.available,
-      stickyTickers,
-    })
-    : await buildMuhuratBook(provider, {
-      fromDate: from,
-      toDate: to,
-      budget: money.budget,
-      availableMargin: money.available,
-      stickyTickers,
-    });
-  book.funds = money.funds;
-  book.availableMargin = money.available;
-  try {
-    const raw = await provider.getPortfolio();
-    const holdings = raw.holdingRows || [];
-    const positions = raw.positionRows || [];
-    book.portfolioRows = { holdings, positions };
-    book.portfolio = summarizePortfolio(holdings, positions);
-  } catch (e) {
-    book.portfolioRows = { holdings: [], positions: [] };
-    book.portfolio = { investment: 0, pnl: 0, error: e.message };
+async function attachPortfolioToBook(provider, book, portfolioCache) {
+  if (portfolioCache) {
+    book.portfolioRows = portfolioCache.portfolioRows;
+    book.portfolio = portfolioCache.portfolio;
+  } else {
+    try {
+      const raw = await provider.getPortfolio();
+      const holdings = raw.holdingRows || [];
+      const positions = raw.positionRows || [];
+      book.portfolioRows = { holdings, positions };
+      book.portfolio = summarizePortfolio(holdings, positions);
+    } catch (e) {
+      book.portfolioRows = { holdings: [], positions: [] };
+      book.portfolio = { investment: 0, pnl: 0, error: e.message };
+    }
   }
   book.lossGate = portfolioLossGate(book);
   if (book.lossGate.blocked) {
@@ -541,11 +697,89 @@ async function fetchBook(provider, { mode = 'equity', stickyTickers = [] } = {})
   return book;
 }
 
+async function fetchBook(provider, {
+  mode = 'equity',
+  stickyTickers = [],
+  budget,
+  money,
+  portfolioCache,
+  skipPortfolio = false,
+} = {}) {
+  const to = istDateKey(Date.now());
+  const from = shiftDate(to, -120);
+  const resolved = await resolveLiveBudget(provider, { budget, money });
+  const book = mode === 'options'
+    ? await buildMuhuratOptionsBook(provider, {
+      fromDate: from,
+      toDate: to,
+      budget: resolved.budget,
+      availableMargin: resolved.available,
+      stickyTickers,
+    })
+    : await buildMuhuratBook(provider, {
+      fromDate: from,
+      toDate: to,
+      budget: resolved.budget,
+      availableMargin: resolved.available,
+      stickyTickers,
+    });
+  book.funds = resolved.funds;
+  book.availableMargin = resolved.available;
+  if (!skipPortfolio) await attachPortfolioToBook(provider, book, portfolioCache);
+  else {
+    book.portfolioRows = { holdings: [], positions: [] };
+    book.portfolio = { investment: 0, pnl: 0 };
+    book.lossGate = { blocked: false };
+  }
+  return book;
+}
+
+async function loadPortfolioCache(provider) {
+  try {
+    const raw = await provider.getPortfolio();
+    const holdings = raw.holdingRows || [];
+    const positions = raw.positionRows || [];
+    return {
+      portfolioRows: { holdings, positions },
+      portfolio: summarizePortfolio(holdings, positions),
+    };
+  } catch (e) {
+    return {
+      portfolioRows: { holdings: [], positions: [] },
+      portfolio: { investment: 0, pnl: 0, error: e.message },
+    };
+  }
+}
+
 async function once(opts = {}) {
-  const mode = opts.mode === 'options' || isOptionsArg() ? 'options' : 'equity';
+  const mode = resolveRunMode(opts);
   const ready = await runCheckpoints(opts);
   if (!ready) return;
   const provider = new UpstoxProvider(config.upstox.accessToken);
+  if (mode === 'both') {
+    const money = await resolveLiveBudget(provider);
+    const portfolioCache = await loadPortfolioCache(provider);
+    const stockBudget = Number(process.env.MUHURAT_BUDGET_STOCK || process.env.MUHURAT_BUDGET || money.budget);
+    const optionsBudget = Number(process.env.MUHURAT_BUDGET_OPTIONS || process.env.MUHURAT_BUDGET || money.budget);
+    const book = await fetchBook(provider, {
+      mode: 'equity',
+      budget: stockBudget,
+      money,
+      portfolioCache,
+    });
+    const optionsBook = await fetchBook(provider, {
+      mode: 'options',
+      budget: optionsBudget,
+      money,
+      portfolioCache,
+    });
+    const text = render(
+      { book, optionsBook, mode: 'both', updatedAt: istFullStr(Date.now()) },
+      { width: Math.max(72, (process.stdout.columns || 100) - 1), height: 200, fill: false }
+    );
+    console.log(text);
+    return;
+  }
   const book = await fetchBook(provider, { mode });
   const text = render(
     { book, mode, updatedAt: istFullStr(Date.now()) },
@@ -555,52 +789,103 @@ async function once(opts = {}) {
 }
 
 async function live(opts = {}) {
-  const mode = opts.mode === 'options' || isOptionsArg() ? 'options' : 'equity';
+  const mode = resolveRunMode(opts);
   process.env.MUHURAT_BUY_APPROVED = 'NO';
   const ready = await runCheckpoints(opts);
   if (!ready) return;
 
   const defaultBudget = Number(process.env.MUHURAT_BUDGET || 20000);
+  const defaultStockBudget = Number(process.env.MUHURAT_BUDGET_STOCK || defaultBudget);
+  const defaultOptionsBudget = Number(process.env.MUHURAT_BUDGET_OPTIONS || defaultBudget);
   let bot = null;
+  let optionsBot = null;
+  let stockBudget = defaultStockBudget;
+  let optionsBudget = defaultOptionsBudget;
+
   if (process.env.MUHURAT_LIVE === 'true') {
-    const gate = await askBuyApproval({ defaultBudget });
+    const gateModes = mode === 'both'
+      ? ['equity', 'options']
+      : mode === 'options'
+        ? ['options']
+        : ['equity'];
+    const gate = await askBuyApproval({
+      defaultBudget,
+      defaultStockBudget,
+      defaultOptionsBudget,
+      modes: gateModes,
+    });
     if (gate.approved) {
       process.env.MUHURAT_BUY_APPROVED = 'YES';
+      stockBudget = gate.stockBudget || defaultStockBudget;
+      optionsBudget = gate.optionsBudget || defaultOptionsBudget;
       process.env.MUHURAT_BUDGET = String(gate.budget);
+      process.env.MUHURAT_BUDGET_STOCK = String(stockBudget);
+      process.env.MUHURAT_BUDGET_OPTIONS = String(optionsBudget);
     } else {
       process.env.MUHURAT_BUY_APPROVED = 'NO';
       console.log(amber(gate.reason || 'Watch-only mode.'));
     }
   } else {
     console.log(dim(
-      mode === 'options'
-        ? 'MUHURAT_LIVE is not true — Options signals / watch only (no Upstox orders).'
-        : 'MUHURAT_LIVE is not true — signals / watch only (no Upstox orders).'
+      mode === 'both'
+        ? 'MUHURAT_LIVE is not true — stocks+options signals / watch only (no Upstox orders).'
+        : mode === 'options'
+          ? 'MUHURAT_LIVE is not true — Options signals / watch only (no Upstox orders).'
+          : 'MUHURAT_LIVE is not true — signals / watch only (no Upstox orders).'
     ));
   }
 
   const provider = new UpstoxProvider(config.upstox.accessToken);
-  bot = createMuhuratBot(provider, { mode });
-  if (bot) {
-    console.log(red(bold(
-      `FULL AUTO ARMED${mode === 'options' ? ' (OPTIONS)' : ''} — budget ₹${Number(process.env.MUHURAT_BUDGET).toLocaleString('en-IN')} · max ${maxTradesPerDay(mode)} trades/day. Real BUY/SELL after session rules. q quit.`
-    )));
+  if (mode === 'both') {
+    bot = createMuhuratBot(provider, { mode: 'equity', budget: stockBudget, enforceBudget: true });
+    optionsBot = createMuhuratBot(provider, { mode: 'options', budget: optionsBudget, enforceBudget: true });
+  } else {
+    bot = createMuhuratBot(provider, {
+      mode,
+      budget: mode === 'options' ? optionsBudget : stockBudget,
+    });
+  }
+
+  if (bot || optionsBot) {
+    if (mode === 'both') {
+      console.log(red(bold(
+        `FULL AUTO ARMED (STOCKS+OPTIONS) — stocks ₹${stockBudget.toLocaleString('en-IN')} (max ${maxTradesPerDay('equity')}/day) · options ₹${optionsBudget.toLocaleString('en-IN')} (max ${maxTradesPerDay('options')}/day). q quit.`
+      )));
+    } else {
+      console.log(red(bold(
+        `FULL AUTO ARMED${mode === 'options' ? ' (OPTIONS)' : ''} — budget ₹${Number(process.env.MUHURAT_BUDGET).toLocaleString('en-IN')} · max ${maxTradesPerDay(mode)} trades/day. Real BUY/SELL after session rules. q quit.`
+      )));
+    }
   } else {
     console.log(dim(
-      mode === 'options'
-        ? 'Running Options mode without order bot — NIFTY/BANKNIFTY ATM CE/PE levels only.'
-        : 'Running without order bot — ENTRY/BUY/SELL levels only.'
+      mode === 'both'
+        ? 'Running stocks+options without order bot — signals only.'
+        : mode === 'options'
+          ? 'Running Options mode without order bot — NIFTY/BANKNIFTY ATM CE/PE levels only.'
+          : 'Running without order bot — ENTRY/BUY/SELL levels only.'
     ));
   }
+
   const keys = new Set(mode === 'options' ? [] : allInstrumentKeys());
   const ltpByKey = new Map();
   const state = {
     mode,
-    book: { mode, core: [], extrasBuy: [], extrasWatch: [], extrasSkipHot: [], screened: 0 },
+    book: {
+      mode: mode === 'options' ? 'options' : 'equity',
+      core: [],
+      extrasBuy: [],
+      extrasWatch: [],
+      extrasSkipHot: [],
+      screened: 0,
+    },
+    optionsBook: mode === 'both'
+      ? { mode: 'options', core: [], extrasBuy: [], extrasWatch: [], extrasSkipHot: [], screened: 0 }
+      : null,
     updatedAt: '',
     error: '',
     feed: '—',
     bot: bot ? bot.snapshot() : null,
+    optionsBot: optionsBot ? optionsBot.snapshot() : null,
   };
 
   const term = openTerminal({
@@ -608,7 +893,7 @@ async function live(opts = {}) {
     render,
   });
   if (!term) {
-    await once();
+    await once({ mode });
     return;
   }
 
@@ -620,6 +905,10 @@ async function live(opts = {}) {
       tickTimer = null;
       state.book = patchBookLtps(state.book, ltpByKey);
       repriceBookPortfolio(state.book, ltpByKey);
+      if (state.optionsBook) {
+        state.optionsBook = patchBookLtps(state.optionsBook, ltpByKey);
+        repriceBookPortfolio(state.optionsBook, ltpByKey);
+      }
       state.updatedAt = istFullStr(Date.now());
       term.draw();
     }, 150);
@@ -643,15 +932,50 @@ async function live(opts = {}) {
 
   async function refreshBook() {
     try {
-      const stickyTickers = ((state.bot && state.bot.positions) || [])
-        .filter((p) => p && p.qty > 0)
-        .map((p) => p.ticker);
-      const book = await fetchBook(provider, { mode, stickyTickers });
-      syncPortfolioKeys(book, feed);
-      repriceBookPortfolio(book, ltpByKey);
-      state.book = patchBookLtps(book, ltpByKey);
-      if (bot) {
-        state.bot = await bot.tick(state.book, ltpByKey);
+      if (mode === 'both') {
+        const money = await resolveLiveBudget(provider);
+        const portfolioCache = await loadPortfolioCache(provider);
+        const stickyStock = ((state.bot && state.bot.positions) || [])
+          .filter((p) => p && p.qty > 0)
+          .map((p) => p.ticker);
+        const stickyOpt = ((state.optionsBot && state.optionsBot.positions) || [])
+          .filter((p) => p && p.qty > 0)
+          .map((p) => p.ticker);
+        const book = await fetchBook(provider, {
+          mode: 'equity',
+          stickyTickers: stickyStock,
+          budget: stockBudget,
+          money,
+          portfolioCache,
+        });
+        const optionsBook = await fetchBook(provider, {
+          mode: 'options',
+          stickyTickers: stickyOpt,
+          budget: optionsBudget,
+          money,
+          portfolioCache,
+        });
+        syncPortfolioKeys(book, feed);
+        syncPortfolioKeys(optionsBook, feed);
+        repriceBookPortfolio(book, ltpByKey);
+        repriceBookPortfolio(optionsBook, ltpByKey);
+        state.book = patchBookLtps(book, ltpByKey);
+        state.optionsBook = patchBookLtps(optionsBook, ltpByKey);
+        if (bot) state.bot = await bot.tick(state.book, ltpByKey);
+        if (optionsBot) state.optionsBot = await optionsBot.tick(state.optionsBook, ltpByKey);
+      } else {
+        const stickyTickers = ((state.bot && state.bot.positions) || [])
+          .filter((p) => p && p.qty > 0)
+          .map((p) => p.ticker);
+        const book = await fetchBook(provider, {
+          mode,
+          stickyTickers,
+          budget: mode === 'options' ? optionsBudget : stockBudget,
+        });
+        syncPortfolioKeys(book, feed);
+        repriceBookPortfolio(book, ltpByKey);
+        state.book = patchBookLtps(book, ltpByKey);
+        if (bot) state.bot = await bot.tick(state.book, ltpByKey);
       }
       state.updatedAt = istFullStr(Date.now());
       state.error = '';
@@ -663,6 +987,8 @@ async function live(opts = {}) {
   }
 
   async function pollLtps() {
+    // Websocket feed already carries LTPs — REST polling only burns rate limit.
+    if (state.feed === 'live') return;
     try {
       const map = await provider.getLtps([...keys]);
       for (const [k, v] of map.entries()) {
@@ -690,15 +1016,24 @@ async function live(opts = {}) {
 
   await refreshBook();
   await pollLtps();
-  setInterval(() => refreshBook().catch(() => {}), bot ? 8 * 1000 : 20 * 1000);
-  setInterval(() => pollLtps().catch(() => {}), 3 * 1000);
-  if (bot) {
+  // Pace REST so Upstox/Cloudflare do not 429 (esp. both mode + checkpoints).
+  const refreshMs = (bot || optionsBot)
+    ? (mode === 'both' ? 15 * 1000 : 10 * 1000)
+    : 20 * 1000;
+  const pollMs = mode === 'both' ? 8 * 1000 : 5 * 1000;
+  setInterval(() => refreshBook().catch(() => {}), refreshMs);
+  setInterval(() => pollLtps().catch(() => {}), pollMs);
+  if (bot || optionsBot) {
     setInterval(() => {
-      bot.tick(state.book, ltpByKey).then((v) => {
-        state.bot = v;
-        term.draw();
-      }).catch(() => {});
-    }, 4 * 1000);
+      const jobs = [];
+      if (bot && state.book) {
+        jobs.push(bot.tick(state.book, ltpByKey).then((v) => { state.bot = v; }));
+      }
+      if (optionsBot && state.optionsBook) {
+        jobs.push(optionsBot.tick(state.optionsBook, ltpByKey).then((v) => { state.optionsBot = v; }));
+      }
+      Promise.all(jobs).then(() => term.draw()).catch(() => {});
+    }, mode === 'both' ? 6 * 1000 : 4 * 1000);
   }
 }
 
@@ -742,8 +1077,8 @@ if (require.main === module) {
   const checksOnly = process.argv.includes('--checks-only');
   const skip = process.argv.includes('--skip-checks');
   const demoMode = isDemoArg();
-  const optionsMode = isOptionsArg();
-  const opts = { skip, mode: optionsMode ? 'options' : 'equity' };
+  const mode = resolveRunMode();
+  const opts = { skip, mode };
   (async () => {
     if (demoMode) {
       await runDemo();
@@ -754,7 +1089,9 @@ if (require.main === module) {
       console.log(formatChecks(report, { starting: false }));
       process.exit(report.ok ? 0 : 1);
     }
-    if (optionsMode) {
+    if (mode === 'both') {
+      console.log(amber(bold('Muhurat BOTH — stocks + options in one process (separate budgets).')));
+    } else if (mode === 'options') {
       console.log(amber(bold('Muhurat Options mode — NIFTY 50 + BANKNIFTY ATM CE/PE only.')));
     }
     console.log(dim(`Session · ${SESSION.label}`));
@@ -773,6 +1110,10 @@ module.exports = {
   runDemo,
   isDemoArg,
   isOptionsArg,
+  isBothArg,
+  isStocksOnlyArg,
+  resolveRunMode,
   repriceBookPortfolio,
   portfolioKeysOf,
+  userSignalLines,
 };
