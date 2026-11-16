@@ -15,6 +15,7 @@ const { openTerminal } = require('../src/terminal');
 const { UpstoxFeed } = require('../src/data/upstox-feed');
 const { summarizePortfolio, summarizeLive } = require('../src/portfolio');
 const { demoChecks, buildDemoState } = require('../src/muhurat-demo');
+const { startMuhuratWeb } = require('../src/muhurat-web');
 
 function isBothArg() {
   // Supports: --both / --all / Both, plus MUHURAT_MODE=both (muhurat2 default).
@@ -242,29 +243,19 @@ function stockBox(row, inner) {
     return lines;
   }
   const lv = row.levels || {};
-  const lotBit = row.lots > 0 ? ` ${row.lots} lot×${row.lotSize || ''}`.trim() : '';
-  const qtyBit = row.qty > 0
-    ? ` qty ${row.qty}${lotBit ? ` (${lotBit})` : ''}≈₹${fmt(row.spend)}`
-    : '';
-  const edgeBit = row.expectedT1 > 0 ? green(` T1≈+₹${fmt(row.expectedT1)}`) : (row.reward1Pct != null ? dim(` T1 ${pct(row.reward1Pct)}`) : '');
+  const lotBit = row.lots > 0 ? ` ${row.lots}L` : '';
+  const qtyBit = row.qty > 0 ? ` qty ${row.qty}${lotBit} ₹${fmt(row.spend)}` : '';
   const liveBit = row.live ? green(' LIVE') : '';
-  const pScore = row.profitScore != null ? dim(` P${fmt(row.profitScore)}`) : dim(` ${row.score} `);
-  const gainerBit = row.fromGainer ? amber(' GAINER') : '';
-  lines.push(cardRow(` ${bold(row.ticker)} ${verdictPaint(row.verdict)}${gainerBit}${liveBit}`, pScore, inner, border));
-  const dayBit = row.dayChangePct != null ? ` day ${tonePct(row.dayChangePct)}` : '';
-  const idxBit = row.indexLtp != null ? ` idx ${fmt(row.indexLtp)}` : '';
-  lines.push(cardRow(clip(` LTP ${fmt(row.ltp)} RSI ${fmt(row.rsi)} SMA ${tonePct(row.distSma)}${idxBit}${dayBit}${qtyBit}${edgeBit}`, inner), '', inner, border));
+  const waitBit = row.confirmLeftSec != null ? amber(` ${row.confirmLeftSec}s`) : '';
+  const pScore = row.profitScore != null ? bold(`P${fmt(row.profitScore)}`) : dim(`${row.score || '—'}`);
+  const gainerBit = row.fromGainer ? amber(' ▲') : '';
+  lines.push(cardRow(` ${bold(row.ticker)} ${verdictPaint(row.verdict)}${gainerBit}${liveBit}${waitBit}`, pScore, inner, border));
   lines.push(cardRow(clip(
-    ` ENTRY ${fmt(row.entry)}  BUY ${row.buy === 'YES' ? green('YES') : row.buy === 'LATER' ? amber('LATER') : dim(row.buy || 'NO')}  ACT ${bold(row.action || 'WAIT')}`,
+    ` LTP ${fmt(row.ltp)}  RSI ${fmt(row.rsi)}${row.dayChangePct != null ? `  day ${tonePct(row.dayChangePct)}` : ''}${qtyBit}`,
     inner
   ), '', inner, border));
   lines.push(cardRow(clip(
-    ` SELL  SL ${red(fmt(row.sellStop))}  T1 ${green(fmt(row.sellT1))}  T2 ${green(fmt(row.sellT2))}`,
-    inner
-  ), '', inner, border));
-  lines.push(cardRow(clip(` Sup ${fmt(lv.support)} Res ${fmt(lv.resistance)} R2 ${fmt(lv.resistanceNext)}`, inner), '', inner, border));
-  lines.push(cardRow(clip(
-    ` Trail ${lv.trailMode === 'options' ? 'opt' : 'stk'} arm→${fmt(lv.trailArmPx || lv.trailArm06)} lock→${fmt(lv.trailFirstLockPx || lv.trailLock03)} · ${lv.trailLabel || ''}`,
+    ` SL ${red(fmt(row.sellStop || lv.stopLoss))}  T1 ${green(fmt(row.sellT1 || lv.target1))}  T2 ${green(fmt(row.sellT2 || lv.target2))}  ${bold(row.action || 'WAIT')}`,
     inner
   ), '', inner, border));
   lines.push(border('└' + '─'.repeat(inner) + '┘'));
@@ -366,13 +357,14 @@ function userSignalLines(book, bot, phase, width) {
   }
 
   if (!buys.length && !sells.length) return lines;
-  lines.push(bold('USER SIGNALS') + dim(' · place manually if auto order blocked'));
+  lines.push(clip(bold('── USER SIGNALS ──') + dim('  place in Upstox app if auto blocked'), width));
   for (const t of buys.slice(0, 8)) {
-    lines.push(clip(green(bold(`BUY(USER) ==> ${t}`)), width));
+    lines.push(clip(green(bold(`  BUY(USER)  ==>  ${t}`)), width));
   }
   for (const t of sells.slice(0, 8)) {
-    lines.push(clip(red(bold(`SELL(USER) ==> ${t}`)), width));
+    lines.push(clip(red(bold(`  SELL(USER) ==>  ${t}`)), width));
   }
+  lines.push('');
   return lines;
 }
 
@@ -400,14 +392,15 @@ function renderBookPanel(state, opts = {}) {
       width
     ));
   }
+  // USER SIGNALS near the top so they are hard to miss.
+  lines.push(...userSignalLines(book, state && state.bot, phase, width));
   if (optionsMode && (book.indexes || []).length) {
     const bits = (book.indexes || []).map((ix) => {
       if (!ix || ix.error) return `${ix && ix.indexId ? ix.indexId : '?'} err`;
-      return `${ix.indexId} ${fmt(ix.indexLtp)} bias ${ix.bias || '—'} P-ready`;
+      return `${ix.indexId} ${fmt(ix.indexLtp)} ${ix.bias || '—'}`;
     });
     lines.push(clip(dim(`Index  ${bits.join(' · ')}`), width));
   }
-  // Positions only: total investment + always show Profit and Loss.
   const openPos = (state && state.bot && state.bot.positions) || [];
   if (openPos.length) {
     let invest = 0;
@@ -422,27 +415,16 @@ function renderBookPanel(state, opts = {}) {
       value += Number.isFinite(last) ? last * qty : (Number.isFinite(entry) ? entry * qty : 0);
     }
     const pnl = value - invest;
-    const profit = pnl > 0 ? pnl : 0;
-    const loss = pnl < 0 ? Math.abs(pnl) : 0;
     lines.push(clip(
-      bold('Positions') +
-        dim(` · Invest ₹${fmt(invest)}`) +
-        dim(` · Value ₹${fmt(value)}`) +
-        ' · ' + green(`Profit ₹${fmt(profit)}`) +
-        ' · ' + red(`Loss ₹${fmt(loss)}`),
-      width
-    ));
-  } else if (phase.canDecideBuy) {
-    lines.push(clip(
-      bold('Positions') + dim(' · Invest ₹0.00') + ' · ' + green('Profit ₹0.00') + ' · ' + red('Loss ₹0.00'),
+      bold('Open') +
+        dim(` ₹${fmt(invest)}→${fmt(value)}`) +
+        ' · ' + green(`+₹${fmt(pnl > 0 ? pnl : 0)}`) +
+        ' · ' + red(`−₹${fmt(pnl < 0 ? Math.abs(pnl) : 0)}`),
       width
     ));
   }
   const bud = book.budget;
   const avail = book.availableMargin != null ? book.availableMargin : (bud && bud.availableMargin);
-  if (avail != null && Number.isFinite(Number(avail))) {
-    lines.push(clip(green(`Available margin ₹${fmt(avail)}`) + dim(' · Live BUY = P > 12 only'), width));
-  }
   const tradeMode = optionsMode ? 'options' : 'equity';
   const tradeCap = (book.rules && book.rules.maxTrades) != null
     ? book.rules.maxTrades
@@ -451,50 +433,31 @@ function renderBookPanel(state, opts = {}) {
   const confirmNeed = (book.budget && book.budget.confirmSec) != null
     ? book.budget.confirmSec
     : (book.rules && book.rules.confirmSec);
-  if (tradeCap > 0) {
-    lines.push(clip(
-      dim(`Max ${tradeCap} ${optionsMode ? 'option' : 'stock'} trades/day`) +
-        (botTrades != null ? dim(` · used ${botTrades}/${tradeCap}`) : '') +
-        (confirmNeed > 0 ? dim(` · confirm ${confirmNeed}s before BUY`) : ''),
-      width
-    ));
-  }
-  if (bud) {
-    if (phase.canDecideBuy && bud.pickCount > 0) {
-      lines.push(clip(
-        green(`Budget ₹${fmt(bud.budget)}`) +
-          dim(` · ${bud.pickCount} picks · use ₹${fmt(bud.used)} · left ₹${fmt(bud.left)}`) +
-          (bud.expectedT1 != null ? green(` · if T1s hit ≈+₹${fmt(bud.expectedT1)}`) : ''),
-        width
-      ));
-    } else {
-      lines.push(clip(
-        dim(`Budget ₹${fmt(bud.budget)} ready · after open: BUY names with P > 12 · max ${tradeCap || '∞'} trades/day`),
-        width
-      ));
-    }
-  }
+  const statusBits = [];
+  if (avail != null && Number.isFinite(Number(avail))) statusBits.push(green(`margin ₹${fmt(avail)}`));
+  if (bud) statusBits.push(dim(`budget ₹${fmt(bud.budget)}${bud.pickCount ? ` · ${bud.pickCount} picks` : ''}`));
+  if (tradeCap > 0) statusBits.push(dim(`max ${tradeCap}/day${botTrades != null ? ` · ${botTrades} used` : ''}`));
+  if (confirmNeed > 0) statusBits.push(dim(`confirm ${confirmNeed}s`));
+  if (statusBits.length) lines.push(clip(statusBits.join(dim(' · ')), width));
   const lossGate = (state && state.bot && state.bot.lossGate) || (book && book.lossGate);
   if (lossGate && lossGate.blocked) {
-    lines.push(clip(red(bold('DO NOT TRADE')) + red(` · book loss ${lossGate.pnlPct}% (near −${lossGate.limit}% / 20% rule)`), width));
+    lines.push(clip(red(bold('DO NOT TRADE')) + red(` · book loss ${lossGate.pnlPct}%`), width));
   }
   if (state && state.bot && state.bot.live) {
-    lines.push(clip(red(bold('FULL AUTO LIVE')) + dim(` · product ${state.bot.product || 'I'} · spend ₹${fmt(state.bot.spend)} · open ${state.bot.openCount || 0}`), width));
+    lines.push(clip(red(bold('AUTO LIVE')) + dim(` · ${state.bot.product || 'I'} · spend ₹${fmt(state.bot.spend)} · open ${state.bot.openCount || 0}`), width));
     if (state.bot.lastError) lines.push(clip(red(state.bot.lastError), width));
     for (const p of state.bot.positions || []) {
       lines.push(clip(
-        green(`IN ${p.ticker} qty ${p.qty} entry ${fmt(p.entry)} SL ${fmt(p.stop)} stage ${p.stage} last ${fmt(p.last)}`),
+        green(`IN ${p.ticker} ×${p.qty} @${fmt(p.entry)} SL ${fmt(p.stop)} last ${fmt(p.last)}`),
         width
       ));
     }
-    for (const row of (state.bot.log || []).slice(-3)) {
+    for (const row of (state.bot.log || []).slice(-2)) {
       lines.push(clip(dim(row.msg), width));
     }
-  } else {
-    lines.push(clip(dim('Auto off — signals only. Trail: stock +2.5%→+1.5% then +1% · options +5%→cost then +10%/+5% · exit 3:15'), width));
+  } else if (!opts.hideAutoOff) {
+    lines.push(clip(dim('Auto off — signals only · exit 3:15'), width));
   }
-
-  lines.push(...userSignalLines(book, state && state.bot, phase, width));
 
   const byPDesc = (a, b) => (Number(b.profitScore) || -99) - (Number(a.profitScore) || -99);
   const gainerTickerSet = new Set(
@@ -536,16 +499,16 @@ function renderBookPanel(state, opts = {}) {
       lines.push(bold('Live BUY — blocked'));
       lines.push(clip(red('DO NOT TRADE — book loss near 20%. No new buys.'), width));
     } else {
-      lines.push(bold('Live BUY — P > 12'));
+      lines.push(bold('Live BUY'));
       lines.push(...placeBoxes(liveBuys, width));
     }
     if (watchlistLive.length) {
-      lines.push(bold('Watchlist — P > 12'));
+      lines.push(bold('Watch'));
       lines.push(...placeBoxes(watchlistLive, width));
     }
     const confirming = (book.budget && book.budget.confirming) || [];
     if (confirming.length) {
-      lines.push(bold('Confirming — top P, waiting stability before trade slot'));
+      lines.push(bold('Confirming'));
       lines.push(...placeBoxes(
         confirming.map((r) => ({
           ...r,
@@ -558,7 +521,7 @@ function renderBookPanel(state, opts = {}) {
     }
   } else {
     const watchBefore = (core.length ? core : prep).slice().sort(byPDesc);
-    lines.push(bold('Watchlist — P > 12 (no BUY call yet)'));
+    lines.push(bold('Watch — no BUY call yet'));
     lines.push(...placeBoxes(watchBefore, width));
     if (prep.length && core.length) {
       const prepExtra = prep
@@ -566,7 +529,7 @@ function renderBookPanel(state, opts = {}) {
         .sort(byPDesc)
         .slice(0, 6);
       if (prepExtra.length) {
-        lines.push(bold('Other PREP — P > 12 (wait for open)'));
+        lines.push(bold('Other PREP'));
         lines.push(...placeBoxes(prepExtra, width));
       }
     }
@@ -589,7 +552,7 @@ function renderBookPanel(state, opts = {}) {
       .sort(byPDesc)
       .slice(0, 8);
     if (gainers.length) {
-      lines.push(bold('Top Gainers — P > 12'));
+      lines.push(bold('Top Gainers'));
       lines.push(...placeBoxes(gainers, width));
     } else if (book.gainerError) {
       lines.push(clip(amber(`Top Gainers · ${book.gainerError}`), width));
@@ -597,7 +560,7 @@ function renderBookPanel(state, opts = {}) {
   }
 
   if (!opts.hideFooter) {
-    lines.push(clip(dim('Hold above open 5–10m → buy · book T1 · exit T2 or 3:15 · q quit'), width));
+    lines.push(clip(dim('BUY after 9:25 · confirm ~3m · exit 3:15 · q quit'), width));
   }
   if (opts.log) lines.push(clip(dim(opts.log), width));
   return lines;
@@ -615,26 +578,27 @@ function render(state, opts = {}) {
     const feedLabel = state && state.feed === 'live' ? green('FEED LIVE') : state && state.feed === 'poll' ? amber('FEED POLL') : dim('FEED —');
     const header = [
       clip(
-        bold('Muhurat') + dim('  stocks + options · one process · separate budgets  ') + feedLabel +
-          dim(state && state.updatedAt ? ` · ${state.updatedAt}` : ''),
+        bold('Muhurat2') + dim('  stocks + options  ') + feedLabel +
+          dim(state && state.updatedAt ? ` · ${state.updatedAt}` : '') +
+          dim(opts.url ? ` · web ${opts.url}` : ''),
         width
       ),
       ...sharedError,
     ];
     const stockLines = renderBookPanel(
       { ...state, mode: 'equity', book: state.book || {}, bot: state.bot, error: '' },
-      { width, panelTitle: 'Stocks', hideSharedError: true, hideFeedPhase: false, hideFooter: true }
+      { width, panelTitle: '▸ Stocks', hideSharedError: true, hideFeedPhase: false, hideFooter: true, hideAutoOff: true }
     );
     const optLines = renderBookPanel(
       { ...state, mode: 'options', book: state.optionsBook || {}, bot: state.optionsBot, error: '' },
-      { width, panelTitle: 'Options', hideSharedError: true, hideFeedPhase: true, hideFooter: true }
+      { width, panelTitle: '▸ Options', hideSharedError: true, hideFeedPhase: true, hideFooter: true, hideAutoOff: true }
     );
     lines = [
       ...header,
       ...stockLines,
-      clip(dim('─'.repeat(Math.min(width, 48))), width),
+      clip(dim('─'.repeat(Math.min(width, 52))), width),
       ...optLines,
-      clip(dim('Hold above open 5–10m → buy · separate stock/options budgets · exit 3:15 · q quit'), width),
+      clip(dim('BUY after 9:25 · confirm ~3m · exit 3:15 · web UI on :3001 · q quit'), width),
     ];
   } else {
     lines = renderBookPanel(state, { width, log: opts.log });
@@ -888,13 +852,28 @@ async function live(opts = {}) {
     optionsBot: optionsBot ? optionsBot.snapshot() : null,
   };
 
+  let web = null;
+  try {
+    web = await startMuhuratWeb({ getState: () => state });
+    console.log(green(bold(`Muhurat web UI: ${web.url}`)));
+    if (web.phone) console.log(dim(`Phone (same Wi-Fi): ${web.phone}`));
+  } catch (e) {
+    console.log(amber(`Muhurat web UI unavailable: ${e.message}`));
+  }
+
   const term = openTerminal({
+    url: web ? web.url : undefined,
     getState: () => state,
-    render,
+    render: (s, opts) => render(s, { ...opts, url: web ? web.url : opts && opts.url }),
   });
-  if (!term) {
+  if (!term && !web) {
     await once({ mode });
     return;
+  }
+
+  function pushUi() {
+    if (term) term.draw();
+    if (web) web.broadcast();
   }
 
   let tickTimer = null;
@@ -910,7 +889,7 @@ async function live(opts = {}) {
         repriceBookPortfolio(state.optionsBook, ltpByKey);
       }
       state.updatedAt = istFullStr(Date.now());
-      term.draw();
+      pushUi();
     }, 150);
   }
 
@@ -979,10 +958,10 @@ async function live(opts = {}) {
       }
       state.updatedAt = istFullStr(Date.now());
       state.error = '';
-      term.draw();
+      pushUi();
     } catch (e) {
       state.error = e.message;
-      term.draw();
+      pushUi();
     }
   }
 
@@ -998,7 +977,7 @@ async function live(opts = {}) {
       applyTicks();
     } catch (e) {
       state.error = `LTP ${e.message}`;
-      term.draw();
+      pushUi();
     }
   }
 
@@ -1011,7 +990,7 @@ async function live(opts = {}) {
   feed.start().catch((e) => {
     state.feed = 'poll';
     state.error = `feed ${e.message}`;
-    term.draw();
+    pushUi();
   });
 
   await refreshBook();
@@ -1032,7 +1011,7 @@ async function live(opts = {}) {
       if (optionsBot && state.optionsBook) {
         jobs.push(optionsBot.tick(state.optionsBook, ltpByKey).then((v) => { state.optionsBot = v; }));
       }
-      Promise.all(jobs).then(() => term.draw()).catch(() => {});
+      Promise.all(jobs).then(() => pushUi()).catch(() => {});
     }, mode === 'both' ? 6 * 1000 : 4 * 1000);
   }
 }
