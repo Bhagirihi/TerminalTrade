@@ -251,6 +251,25 @@ function buildOptionRow({
   return applySessionVerdict(row, phaseInfo, openPx);
 }
 
+function optionsLotRule() {
+  // 1-lot premium cost (LTP × lot size):
+  //   below ₹5k  → 2 lots
+  //   ₹5k+ (incl. above ₹10k) → 1 lot
+  const twoLotBelow = Number(process.env.MUHURAT_OPT_TWO_LOT_BELOW);
+  const oneLotFrom = Number(process.env.MUHURAT_OPT_ONE_LOT_FROM);
+  return {
+    twoLotBelow: Number.isFinite(twoLotBelow) && twoLotBelow > 0 ? twoLotBelow : 5000,
+    oneLotFrom: Number.isFinite(oneLotFrom) && oneLotFrom > 0 ? oneLotFrom : 10000,
+  };
+}
+
+function wantedOptionsLots(lotCost) {
+  const { twoLotBelow } = optionsLotRule();
+  if (!(lotCost > 0)) return 0;
+  // Below ₹5k → 2 lots; at/above ₹5k (and above ₹10k) → 1 lot.
+  return lotCost < twoLotBelow ? 2 : 1;
+}
+
 function allocateOptionsBudget(budget, rows, {
   availableMargin = null,
   stickyTickers = [],
@@ -279,16 +298,16 @@ function allocateOptionsBudget(budget, rows, {
     const ltp = Number(pick.ltp);
     if (!(ltp > 0) || !(lot > 0)) continue;
     const lotCost = ltp * lot;
-    const cash = Number((byTicker[pick.ticker] && byTicker[pick.ticker].cash) || pick.spend || 0);
-    let lots = Math.floor(cash / lotCost);
-    // At most 1 lot bump only if it fits the configured options budget remaining.
-    if (lots < 1 && lotCost <= hardCap - used + 1) lots = 1;
-    while (lots > 1 && lots * lotCost > hardCap - used + 1) lots -= 1;
-    if (lots < 1 || lots * lotCost > hardCap - used + 1) {
+    const left = hardCap - used;
+    let lots = wantedOptionsLots(lotCost);
+    // Fit into remaining options budget (never exceed hardCap).
+    while (lots > 1 && lots * lotCost > left + 1) lots -= 1;
+    if (lots < 1 || lots * lotCost > left + 1) {
       unaffordable.push({
         ticker: pick.ticker,
         need: Math.ceil(lotCost),
         budget: hardCap,
+        wantLots: wantedOptionsLots(lotCost),
       });
       delete byTicker[pick.ticker];
       continue;
@@ -525,6 +544,8 @@ function patchOptionsBookLtps(book, ltpByKey) {
 module.exports = {
   buildMuhuratOptionsBook,
   allocateOptionsBudget,
+  wantedOptionsLots,
+  optionsLotRule,
   analyzeIndex,
   premiumLevels,
   scoreOptionSide,

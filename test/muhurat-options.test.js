@@ -38,6 +38,7 @@ test('analyzeIndex returns CE/PE bias from trend', () => {
 });
 
 test('allocateOptionsBudget sizes in lots', () => {
+  // lotCost = 100*65 = 6500 → above ₹5k → 1 lot
   const plan = allocateOptionsBudget(20000, [
     {
       ticker: 'NIFTY 25000 CE',
@@ -56,8 +57,46 @@ test('allocateOptionsBudget sizes in lots', () => {
   assert.ok(plan.pickCount >= 1);
   const pick = plan.picks[0];
   assert.equal(pick.qty % 65, 0);
-  assert.ok(pick.lots >= 1);
+  assert.equal(pick.lots, 1);
   assert.ok(pick.spend <= 20000 + 1);
+});
+
+test('options: below ₹5k lot cost → 2 lots; above ₹10k → 1 lot', () => {
+  const cheap = allocateOptionsBudget(20000, [
+    {
+      ticker: 'BANKNIFTY 50000 CE',
+      key: 'NSE_FO|2',
+      verdict: 'BUY',
+      ltp: 100, // 100*30 = 3000 < 5k → 2 lots
+      lotSize: 30,
+      profitScore: 20,
+      reward1Pct: 20,
+      rr: 1.2,
+      sellT1: 120,
+      levels: { target1: 120, stopLoss: 70 },
+      aboveOpen: true,
+    },
+  ], { now: Date.now() });
+  assert.equal(cheap.picks[0].lots, 2);
+  assert.equal(cheap.picks[0].qty, 60);
+
+  const rich = allocateOptionsBudget(40000, [
+    {
+      ticker: 'NIFTY 25000 CE',
+      key: 'NSE_FO|3',
+      verdict: 'BUY',
+      ltp: 200, // 200*65 = 13000 > 10k → 1 lot
+      lotSize: 65,
+      profitScore: 20,
+      reward1Pct: 20,
+      rr: 1.2,
+      sellT1: 240,
+      levels: { target1: 240, stopLoss: 150 },
+      aboveOpen: true,
+    },
+  ], { now: Date.now() });
+  assert.equal(rich.picks[0].lots, 1);
+  assert.equal(rich.picks[0].qty, 65);
 });
 
 test('allocateOptionsBudget skips 1 lot above hard budget', () => {
