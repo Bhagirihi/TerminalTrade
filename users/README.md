@@ -42,11 +42,11 @@ MUHURAT_USER=a npm run muhurat2
 Run **one process per user** (separate ports):
 
 ```bash
-MUHURAT_USER=a MUHURAT_WEB_PORT=3001 npm run muhurat2
-MUHURAT_USER=b MUHURAT_WEB_PORT=3002 npm run muhurat2
+MUHURAT_USER=a MUHURAT_WEB_PORT=3000 npm run muhurat2
+MUHURAT_USER=b MUHURAT_WEB_PORT=3001 npm run muhurat2
 ```
 
-Open `http://<oracle-ip>:3001/` for A, `:3002` for B, etc.
+Open `http://<oracle-ip>:3000/` for A, `:3001` for B, etc.
 
 ## Brokers
 

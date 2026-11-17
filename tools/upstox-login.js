@@ -2,7 +2,7 @@
 
 // Opens the Upstox login page, catches the redirect, and writes the daily
 // access token into .env as UPSTOX_ACCESS_TOKEN.
-// After success, redirects the browser to the Muhurat UI root (default :3001/).
+// After success, redirects the browser to the Muhurat UI root (default :3000/).
 
 const {
   runInteractiveUpstoxLogin,

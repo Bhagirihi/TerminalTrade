@@ -798,7 +798,7 @@ async function live(opts = {}) {
   const mode = resolveRunMode(opts);
   process.env.MUHURAT_BUY_APPROVED = 'NO';
 
-  // Start web UI first so expired-token login can redirect to http://…:3001/
+  // Start web UI first so expired-token login can redirect to http://…:3000/
   const keys = new Set(mode === 'options' ? [] : allInstrumentKeys());
   const ltpByKey = new Map();
   let bot = null;

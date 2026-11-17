@@ -2,7 +2,7 @@
 
 // Lightweight web UI for muhurat2 — same state as the terminal, on a browser/phone.
 // Listens on 0.0.0.0 so Oracle/public IP can reach it (open port in cloud firewall).
-// Default port 3001 (MUHURAT_WEB_PORT / PORT+1).
+// Default port 3000 (MUHURAT_WEB_PORT, else PORT, else 3000).
 
 const http = require('http');
 const os = require('os');
@@ -33,10 +33,9 @@ function phoneUrl(port) {
 }
 
 function webPortOf() {
-  const n = Number(process.env.MUHURAT_WEB_PORT);
+  const n = Number(process.env.MUHURAT_WEB_PORT || process.env.PORT || 3000);
   if (Number.isFinite(n) && n > 0) return Math.floor(n);
-  const base = Number(process.env.PORT) || 3000;
-  return base === 3000 ? 3001 : base + 1;
+  return 3000;
 }
 
 /** Prefer Oracle/public host so users open the cloud IP, not localhost. */
