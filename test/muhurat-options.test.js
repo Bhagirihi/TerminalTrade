@@ -60,6 +60,27 @@ test('allocateOptionsBudget sizes in lots', () => {
   assert.ok(pick.spend <= 20000 + 1);
 });
 
+test('allocateOptionsBudget skips 1 lot above hard budget', () => {
+  const plan = allocateOptionsBudget(5000, [
+    {
+      ticker: 'NIFTY 25000 CE',
+      key: 'NSE_FO|1',
+      verdict: 'BUY',
+      ltp: 200,
+      lotSize: 65,
+      profitScore: 20,
+      reward1Pct: 20,
+      rr: 1.2,
+      sellT1: 240,
+      levels: { target1: 240, stopLoss: 150 },
+      aboveOpen: true,
+    },
+  ], { availableMargin: 100000, now: Date.now() });
+  assert.equal(plan.pickCount, 0);
+  assert.ok((plan.unaffordable || []).length >= 1);
+  assert.ok(plan.unaffordable[0].need >= 13000);
+});
+
 test('isOptionsArg detects --Options', () => {
   const prev = process.argv.slice();
   process.argv = ['node', 'tools/muhurat.js', '--Options'];

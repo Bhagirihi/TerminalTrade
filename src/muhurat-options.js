@@ -270,6 +270,10 @@ function allocateOptionsBudget(budget, rows, {
   const byTicker = { ...(plan.byTicker || {}) };
   const picks = [];
   let used = 0;
+  // Hard cap = configured options budget only (do not inflate with margin twice).
+  // plan.budget already includes availableMargin from allocateBudget — do not add it again.
+  const hardCap = Number(budget) > 0 ? Number(budget) : DEFAULT_BUDGET;
+  const unaffordable = [];
   for (const pick of plan.picks || []) {
     const lot = Number(pick.lotSize) || 1;
     const ltp = Number(pick.ltp);
@@ -277,12 +281,15 @@ function allocateOptionsBudget(budget, rows, {
     const lotCost = ltp * lot;
     const cash = Number((byTicker[pick.ticker] && byTicker[pick.ticker].cash) || pick.spend || 0);
     let lots = Math.floor(cash / lotCost);
-    if (lots < 1 && lotCost <= (Number(plan.budget) + (Number(availableMargin) || 0)) + 1) {
-      // Ensure at least 1 lot if the name was seated and a single lot fits deployable cash.
-      const deployable = Number(plan.budget) + (Number.isFinite(Number(availableMargin)) ? Number(availableMargin) : 0);
-      if (lotCost <= deployable - used + 1) lots = 1;
-    }
-    if (lots < 1) {
+    // At most 1 lot bump only if it fits the configured options budget remaining.
+    if (lots < 1 && lotCost <= hardCap - used + 1) lots = 1;
+    while (lots > 1 && lots * lotCost > hardCap - used + 1) lots -= 1;
+    if (lots < 1 || lots * lotCost > hardCap - used + 1) {
+      unaffordable.push({
+        ticker: pick.ticker,
+        need: Math.ceil(lotCost),
+        budget: hardCap,
+      });
       delete byTicker[pick.ticker];
       continue;
     }
@@ -315,11 +322,13 @@ function allocateOptionsBudget(budget, rows, {
   }
   return {
     ...plan,
+    budget: r2(hardCap),
     used: r2(used),
-    left: r2(Math.max(0, Number(plan.budget) - used)),
+    left: r2(Math.max(0, hardCap - used)),
     pickCount: picks.length,
     picks,
     byTicker,
+    unaffordable: unaffordable.slice(0, 6),
     expectedT1: r2(picks.reduce((s, p) => s + (Number(p.expectedT1) || 0), 0)),
   };
 }

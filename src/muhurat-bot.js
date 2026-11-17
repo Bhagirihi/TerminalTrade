@@ -17,6 +17,7 @@ const {
   optionsTrailConfig,
 } = require('./muhurat');
 const { summarizePortfolio } = require('./portfolio');
+const { staticIpHint } = require('./upstox-ip');
 
 const PAPER_DIR = path.join(__dirname, '..', 'paper');
 const TAG = 'muhurat';
@@ -370,8 +371,13 @@ async function enterFromBook(provider, state, book, product) {
     // Failed earlier this session — don't hammer the same name until backoff clears.
     if (state.failedBuys && state.failedBuys[pick.ticker] && Date.now() < state.failedBuys[pick.ticker]) continue;
     const need = Number(pick.spend) || pick.qty * pick.ltp;
+    const hard = Number(state.budgetLimit);
+    if (Number.isFinite(hard) && hard > 0 && need > hard + 1) {
+      pushLog(state, `Skip ${pick.ticker} — need ₹${Math.ceil(need)}, budget only ₹${hard} (raise options/stock budget)`);
+      continue;
+    }
     if (spent + need > cap + 1) {
-      pushLog(state, `Skip ${pick.ticker} — would exceed ₹${cap}`);
+      pushLog(state, `Skip ${pick.ticker} — need ₹${Math.ceil(need)}, cap ₹${Math.floor(cap)}`);
       continue;
     }
     try {
@@ -412,10 +418,10 @@ async function enterFromBook(provider, state, book, product) {
       state.lastError = `BUY ${pick.ticker}: ${e.message}`;
       pushLog(state, state.lastError);
       if (isStaticIpBlock(e)) {
-        state.orderBlockUntil = Date.now() + 5 * 60 * 1000;
+        state.orderBlockUntil = Date.now() + 15 * 60 * 1000;
         state.failedBuys = state.failedBuys || {};
         state.failedBuys[pick.ticker] = state.orderBlockUntil;
-        pushLog(state, 'Static IP block — pausing new BUY attempts for 5 min. Fix Upstox Static IPs / restart after login.');
+        pushLog(state, `Static IP block — pausing BUY 15 min. ${staticIpHint()}`);
         break;
       }
       state.failedBuys = state.failedBuys || {};

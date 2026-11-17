@@ -15,6 +15,7 @@ const {
 const { liveEnabled, CONFIRM, portfolioLossGate, noTradeLossPct } = require('./muhurat-bot');
 const { summarizePortfolio } = require('./portfolio');
 const { istFullStr } = require('./time');
+const { checkEgressIp } = require('./upstox-ip');
 
 function ok(id, detail) {
   return { id, status: 'pass', detail };
@@ -59,6 +60,29 @@ function isRateLimitError(err) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function checkStaticIp() {
+  const rows = [];
+  try {
+    const info = await checkEgressIp();
+    if (!info.allowed.length) {
+      rows.push(warn('UPSTOX_IP', 'No UPSTOX_STATIC_IP_PRIMARY/SECONDARY set — cannot verify egress vs Upstox allowlist'));
+    } else if (info.ok) {
+      rows.push(ok('UPSTOX_IP', `Egress ${info.current} matches allowlist (${info.allowed.join(', ')})`));
+    } else if (info.unmatched) {
+      // Soft-fail: still allow signals / BUY(USER). Live orders will 403 until routed correctly.
+      rows.push(warn(
+        'UPSTOX_IP',
+        `Egress ${info.current} ≠ allowlist ${info.allowed.join(', ')} — live BUY will 403. Use primary IP / VPN / UPSTOX_HTTPS_PROXY`
+      ));
+    } else {
+      rows.push(warn('UPSTOX_IP', info.hint || 'Could not verify public IP'));
+    }
+  } catch (e) {
+    rows.push(warn('UPSTOX_IP', e.message.slice(0, 140)));
+  }
+  return rows;
 }
 
 async function checkUpstox() {
@@ -180,6 +204,7 @@ async function runMuhuratChecks() {
   checks.push(...(await checkEnv()));
   checks.push(...checkSessionClock());
   checks.push(...checkRulesAck());
+  checks.push(...(await checkStaticIp()));
   checks.push(...(await checkUpstox()));
   checks.push(...(await checkFeedAuthorize()));
   const failed = checks.filter((c) => c.status === 'fail');

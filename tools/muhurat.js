@@ -538,6 +538,12 @@ function renderBookPanel(state, opts = {}) {
     const hot = (book.extrasSkipHot || []).map((r) => `${r.ticker} ${fmt(r.rsi)}`).join(' · ');
     lines.push(clip(red(`Too hot  ${hot}`), width));
   }
+  if ((book.budget && book.budget.unaffordable || []).length) {
+    const bits = book.budget.unaffordable
+      .map((r) => `${r.ticker} needs ₹${fmt(r.need)}`)
+      .join(' · ');
+    lines.push(clip(amber(`Budget too small for 1 lot: ${bits}`), width));
+  }
 
   // Top Gainers (equity mode only): P > 12, skip anything already in Live BUY / Watchlist.
   if (!optionsMode) {

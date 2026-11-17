@@ -86,6 +86,7 @@ function slimBook(book) {
         confirmSec: book.budget.confirmSec,
         expectedT1: book.budget.expectedT1,
         confirming: (book.budget.confirming || []).slice(0, 8).map(slimRow),
+        unaffordable: book.budget.unaffordable || [],
       }
       : null,
     availableMargin: book.availableMargin,

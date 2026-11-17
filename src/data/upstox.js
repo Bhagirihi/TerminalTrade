@@ -23,8 +23,14 @@ let ipv4Dispatcher = null;
 function getIpv4Dispatcher() {
   if (ipv4Dispatcher) return ipv4Dispatcher;
   try {
-    const { Agent } = require('undici');
-    ipv4Dispatcher = new Agent({ connect: { family: 4 } });
+    const undici = require('undici');
+    const proxy = String(process.env.UPSTOX_HTTPS_PROXY || process.env.HTTPS_PROXY || process.env.HTTP_PROXY || '').trim();
+    // Optional: route Upstox via a host that exits on the whitelisted static IP.
+    if (proxy && typeof undici.ProxyAgent === 'function') {
+      ipv4Dispatcher = new undici.ProxyAgent(proxy);
+    } else {
+      ipv4Dispatcher = new undici.Agent({ connect: { family: 4 } });
+    }
   } catch (_) {
     ipv4Dispatcher = null;
   }
