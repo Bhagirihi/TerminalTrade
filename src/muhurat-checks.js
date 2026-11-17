@@ -30,7 +30,7 @@ function fail(id, detail) {
 async function checkEnv() {
   const rows = [];
   if (!config.upstox.accessToken) {
-    rows.push(fail('UPSTOX_TOKEN', 'UPSTOX_ACCESS_TOKEN missing — run npm run login'));
+    rows.push(fail('UPSTOX_TOKEN', 'UPSTOX_ACCESS_TOKEN missing — npm run login / muhurat2 will open Upstox login'));
   } else {
     rows.push(ok('UPSTOX_TOKEN', 'Access token present in .env'));
   }
@@ -231,7 +231,7 @@ function formatChecks(report, opts = {}) {
   }
   lines.push('');
   if (!report.ok) {
-    lines.push(paint('31', `Stopped — ${report.failed.length} checkpoint(s) failed. Fix .env / login, then retry.`));
+    lines.push(paint('31', `Stopped — ${report.failed.length} checkpoint(s) failed. Fix .env / re-login, then retry.`));
   } else if (opts.starting === false) {
     if (report.warned.length) lines.push(paint('33', `${report.warned.length} warning(s).`));
     lines.push(paint('32', 'All required checkpoints passed.'));

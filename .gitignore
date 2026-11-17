@@ -3,3 +3,7 @@ node_modules/
 paper/
 cache/
 .DS_Store
+users/*.env
+users/accounts.json
+!users/*.example
+!users/README.md

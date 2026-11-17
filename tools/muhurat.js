@@ -16,6 +16,11 @@ const { UpstoxFeed } = require('../src/data/upstox-feed');
 const { summarizePortfolio, summarizeLive } = require('../src/portfolio');
 const { demoChecks, buildDemoState } = require('../src/muhurat-demo');
 const { startMuhuratWeb } = require('../src/muhurat-web');
+const {
+  isUpstoxAuthError,
+  muhuratWebRootUrl,
+  runInteractiveUpstoxLogin,
+} = require('../src/upstox-auth');
 
 function isBothArg() {
   // Supports: --both / --all / Both, plus MUHURAT_MODE=both (muhurat2 default).
@@ -129,14 +134,45 @@ function repriceBookPortfolio(book, ltpByKey) {
   return book;
 }
 
-async function runCheckpoints({ skip = false } = {}) {
+function isTokenCheckpointFail(report) {
+  if (!report || !report.failed) return false;
+  return report.failed.some((c) => {
+    if (!c) return false;
+    if (c.id === 'UPSTOX_TOKEN') return true;
+    if (['UPSTOX_PORTFOLIO', 'UPSTOX_LTP', 'UPSTOX_CANDLES', 'UPSTOX_FEED'].includes(c.id)) {
+      return isUpstoxAuthError(c.detail);
+    }
+    return false;
+  });
+}
+
+async function runCheckpoints({ skip = false, autoLogin = true, successUrl } = {}) {
   if (skip) {
     console.log('Muhurat checkpoints skipped (--skip-checks).');
     return true;
   }
-  const report = await runMuhuratChecks();
+  const afterLoginUrl = successUrl || muhuratWebRootUrl();
+  let report = await runMuhuratChecks();
   console.log(formatChecks(report));
   console.log('');
+
+  if (!report.ok && autoLogin && isTokenCheckpointFail(report)) {
+    console.log(amber(bold('Upstox token missing/expired — opening login (same as npm run login)…')));
+    console.log(dim(`After login → ${afterLoginUrl}`));
+    try {
+      const result = await runInteractiveUpstoxLogin({ successUrl: afterLoginUrl });
+      console.log(green(bold(`Logged in as ${result.userName}. Token saved.`)));
+      console.log('');
+      report = await runMuhuratChecks();
+      console.log(formatChecks(report));
+      console.log('');
+    } catch (e) {
+      console.error(red(e.message || e));
+      process.exitCode = 1;
+      return false;
+    }
+  }
+
   if (!report.ok) {
     process.exitCode = 1;
     return false;
@@ -604,7 +640,7 @@ function render(state, opts = {}) {
       ...stockLines,
       clip(dim('─'.repeat(Math.min(width, 52))), width),
       ...optLines,
-      clip(dim('BUY after 9:25 · confirm ~3m · exit 3:15 · web UI on :3001 · q quit'), width),
+      clip(dim(`BUY after 9:25 · confirm ~3m · exit 3:15 · web ${opts.url || 'UI'} · q quit`), width),
     ];
   } else {
     lines = renderBookPanel(state, { width, log: opts.log });
@@ -761,14 +797,60 @@ async function once(opts = {}) {
 async function live(opts = {}) {
   const mode = resolveRunMode(opts);
   process.env.MUHURAT_BUY_APPROVED = 'NO';
-  const ready = await runCheckpoints(opts);
-  if (!ready) return;
+
+  // Start web UI first so expired-token login can redirect to http://…:3001/
+  const keys = new Set(mode === 'options' ? [] : allInstrumentKeys());
+  const ltpByKey = new Map();
+  let bot = null;
+  let optionsBot = null;
+  const state = {
+    mode,
+    book: {
+      mode: mode === 'options' ? 'options' : 'equity',
+      core: [],
+      extrasBuy: [],
+      extrasWatch: [],
+      extrasSkipHot: [],
+      screened: 0,
+    },
+    optionsBook: mode === 'both'
+      ? { mode: 'options', core: [], extrasBuy: [], extrasWatch: [], extrasSkipHot: [], screened: 0 }
+      : null,
+    updatedAt: '',
+    error: '',
+    feed: '—',
+    bot: null,
+    optionsBot: null,
+  };
+
+  let web = null;
+  try {
+    web = await startMuhuratWeb({ getState: () => state });
+    console.log(green(bold(`Muhurat web UI (public): ${web.url}`)));
+    if (web.publicUrl && web.lanUrl && web.publicUrl !== web.lanUrl) {
+      console.log(dim(`LAN: ${web.lanUrl}`));
+    }
+    if (web.localUrl && web.localUrl !== web.url) {
+      console.log(dim(`Local only: ${web.localUrl}`));
+    }
+    console.log(dim('Open Oracle Security List / firewall for TCP ' + web.port + ' if remote users cannot connect.'));
+  } catch (e) {
+    console.log(amber(`Muhurat web UI unavailable: ${e.message}`));
+  }
+
+  const ready = await runCheckpoints({
+    ...opts,
+    // Prefer Oracle/public URL so login lands on the cloud host, not 127.0.0.1
+    successUrl: (web && web.url) || muhuratWebRootUrl(),
+  });
+  if (!ready) {
+    if (web) await web.close().catch(() => {});
+    return;
+  }
 
   const defaultBudget = Number(process.env.MUHURAT_BUDGET || 20000);
   const defaultStockBudget = Number(process.env.MUHURAT_BUDGET_STOCK || defaultBudget);
   const defaultOptionsBudget = Number(process.env.MUHURAT_BUDGET_OPTIONS || defaultBudget);
-  let bot = null;
-  let optionsBot = null;
   let stockBudget = defaultStockBudget;
   let optionsBudget = defaultOptionsBudget;
 
@@ -815,6 +897,8 @@ async function live(opts = {}) {
       budget: mode === 'options' ? optionsBudget : stockBudget,
     });
   }
+  state.bot = bot ? bot.snapshot() : null;
+  state.optionsBot = optionsBot ? optionsBot.snapshot() : null;
 
   if (bot || optionsBot) {
     if (mode === 'both') {
@@ -834,37 +918,6 @@ async function live(opts = {}) {
           ? 'Running Options mode without order bot — NIFTY/BANKNIFTY ATM CE/PE levels only.'
           : 'Running without order bot — ENTRY/BUY/SELL levels only.'
     ));
-  }
-
-  const keys = new Set(mode === 'options' ? [] : allInstrumentKeys());
-  const ltpByKey = new Map();
-  const state = {
-    mode,
-    book: {
-      mode: mode === 'options' ? 'options' : 'equity',
-      core: [],
-      extrasBuy: [],
-      extrasWatch: [],
-      extrasSkipHot: [],
-      screened: 0,
-    },
-    optionsBook: mode === 'both'
-      ? { mode: 'options', core: [], extrasBuy: [], extrasWatch: [], extrasSkipHot: [], screened: 0 }
-      : null,
-    updatedAt: '',
-    error: '',
-    feed: '—',
-    bot: bot ? bot.snapshot() : null,
-    optionsBot: optionsBot ? optionsBot.snapshot() : null,
-  };
-
-  let web = null;
-  try {
-    web = await startMuhuratWeb({ getState: () => state });
-    console.log(green(bold(`Muhurat web UI: ${web.url}`)));
-    if (web.phone) console.log(dim(`Phone (same Wi-Fi): ${web.phone}`));
-  } catch (e) {
-    console.log(amber(`Muhurat web UI unavailable: ${e.message}`));
   }
 
   const term = openTerminal({

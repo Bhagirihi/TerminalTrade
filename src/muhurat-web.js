@@ -1,7 +1,8 @@
 'use strict';
 
 // Lightweight web UI for muhurat2 — same state as the terminal, on a browser/phone.
-// Default http://127.0.0.1:3001 (MUHURAT_WEB_PORT / PORT+1).
+// Listens on 0.0.0.0 so Oracle/public IP can reach it (open port in cloud firewall).
+// Default port 3001 (MUHURAT_WEB_PORT / PORT+1).
 
 const http = require('http');
 const os = require('os');
@@ -9,14 +10,26 @@ const path = require('path');
 const express = require('express');
 const { WebSocketServer } = require('ws');
 
-function phoneUrl(port) {
+function lanHost() {
   for (const list of Object.values(os.networkInterfaces())) {
     for (const net of list || []) {
       const v4 = net.family === 'IPv4' || net.family === 4;
-      if (v4 && !net.internal) return `http://${net.address}:${port}`;
+      if (v4 && !net.internal) return net.address;
     }
   }
   return null;
+}
+
+/** Best URL for users/login redirect: Oracle/public → LAN → localhost. */
+function preferredUrl(port = webPortOf()) {
+  return pageUrl(publicHostOf(), port)
+    || pageUrl(lanHost(), port)
+    || pageUrl('127.0.0.1', port);
+}
+
+function phoneUrl(port) {
+  const host = lanHost();
+  return host ? `http://${host}:${port}` : null;
 }
 
 function webPortOf() {
@@ -24,6 +37,28 @@ function webPortOf() {
   if (Number.isFinite(n) && n > 0) return Math.floor(n);
   const base = Number(process.env.PORT) || 3000;
   return base === 3000 ? 3001 : base + 1;
+}
+
+/** Prefer Oracle/public host so users open the cloud IP, not localhost. */
+function publicHostOf() {
+  const raw = String(
+    process.env.MUHURAT_WEB_HOST
+    || process.env.MUHURAT_PUBLIC_HOST
+    || process.env.UPSTOX_STATIC_IP_PRIMARY
+    || ''
+  ).trim();
+  if (!raw) return null;
+  // Allow host or full URL; strip protocol/path.
+  return raw
+    .replace(/^https?:\/\//i, '')
+    .replace(/\/.*$/, '')
+    .replace(/:\d+$/, '')
+    || null;
+}
+
+function pageUrl(host, port) {
+  if (!host) return null;
+  return `http://${host}:${port}/`;
 }
 
 function slimRow(r) {
@@ -169,8 +204,11 @@ function startMuhuratWeb({ getState } = {}) {
   const port = webPortOf();
   const app = express();
   const publicDir = path.join(__dirname, '..', 'public');
-  app.use(express.static(publicDir));
-  app.get('/', (_req, res) => res.redirect('/muhurat.html'));
+  const muhuratPage = path.join(publicDir, 'muhurat.html');
+  // Root = Muhurat UI (not public/index.html Supertrend page).
+  app.get('/', (_req, res) => res.sendFile(muhuratPage));
+  app.get('/muhurat.html', (_req, res) => res.redirect(301, '/'));
+  app.use(express.static(publicDir, { index: false }));
   app.get('/api/muhurat', (_req, res) => {
     res.json(payloadFromState(typeof getState === 'function' ? getState() : null));
   });
@@ -200,10 +238,20 @@ function startMuhuratWeb({ getState } = {}) {
     });
     server.listen(port, '0.0.0.0', () => {
       listening = true;
+      const publicHost = publicHostOf();
+      const lan = lanHost();
+      const publicUrl = pageUrl(publicHost, port);
+      const lanUrl = pageUrl(lan, port);
+      const localUrl = pageUrl('127.0.0.1', port);
       resolve({
         port,
-        url: `http://127.0.0.1:${port}/muhurat.html`,
-        phone: phoneUrl(port) ? `${phoneUrl(port)}/muhurat.html` : null,
+        // Prefer Oracle/public IP so remote users can open the UI.
+        url: publicUrl || lanUrl || localUrl,
+        publicUrl,
+        lanUrl,
+        localUrl,
+        phone: lanUrl,
+        host: publicHost || lan || '127.0.0.1',
         broadcast,
         close: () => new Promise((r) => server.close(() => r())),
       });
@@ -218,4 +266,8 @@ module.exports = {
   payloadFromState,
   slimBook,
   webPortOf,
+  publicHostOf,
+  pageUrl,
+  lanHost,
+  preferredUrl,
 };
