@@ -23,6 +23,8 @@
     "test": "node --test test/*.test.js",
     "muhurat": "node tools/muhurat.js",
     "muhrat": "node tools/muhurat.js",
+    "muhurat:exit": "node tools/muhurat-exit.js",
+    "muhrat:exit": "node tools/muhurat-exit.js",
     "muhurat2": "node tools/muhurat.js --both",
     "muhrat2": "node tools/muhurat.js --both",
     "muhurat2:both": "node tools/muhurat.js --both",

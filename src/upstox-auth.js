@@ -85,15 +85,79 @@ function muhuratWebRootUrl() {
   return preferredUrl();
 }
 
+/** OAuth callback URL served by muhurat web (must be registered on the Upstox app). */
+function webUpstoxRedirectUri() {
+  const explicit = String(
+    process.env.UPSTOX_WEB_REDIRECT_URI
+    || process.env.MUHURAT_UPSTOX_REDIRECT_URI
+    || ''
+  ).trim();
+  if (explicit) return explicit;
+  const root = muhuratWebRootUrl();
+  return new URL('auth/upstox/callback', root).toString();
+}
+
+function upstoxCredentials(opts = {}) {
+  const envPath = opts.envPath || DEFAULT_ENV_PATH;
+  const fileEnv = loadEnvFile(envPath);
+  return {
+    envPath,
+    apiKey: opts.apiKey || process.env.UPSTOX_API_KEY || fileEnv.UPSTOX_API_KEY || '',
+    apiSecret: opts.apiSecret || process.env.UPSTOX_API_SECRET || fileEnv.UPSTOX_API_SECRET || '',
+    accessToken: process.env.UPSTOX_ACCESS_TOKEN || fileEnv.UPSTOX_ACCESS_TOKEN || '',
+  };
+}
+
+function upstoxLinkStatus() {
+  const { apiKey, apiSecret, accessToken } = upstoxCredentials();
+  return {
+    linked: Boolean(accessToken),
+    hasAppKeys: Boolean(apiKey && apiSecret),
+    redirectUri: webUpstoxRedirectUri(),
+  };
+}
+
+function buildUpstoxAuthUrl({ apiKey, redirectUri, state }) {
+  const authUrl = new URL('https://api.upstox.com/v2/login/authorization/dialog');
+  authUrl.searchParams.set('response_type', 'code');
+  authUrl.searchParams.set('client_id', apiKey);
+  authUrl.searchParams.set('redirect_uri', redirectUri);
+  authUrl.searchParams.set('state', state);
+  return authUrl.toString();
+}
+
+async function exchangeUpstoxCode({ code, apiKey, apiSecret, redirectUri }) {
+  const body = new URLSearchParams({
+    code,
+    client_id: apiKey,
+    client_secret: apiSecret,
+    redirect_uri: redirectUri,
+    grant_type: 'authorization_code',
+  });
+  const tokenRes = await fetch('https://api.upstox.com/v2/login/authorization/token', {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+  const json = await tokenRes.json().catch(() => ({}));
+  if (!tokenRes.ok || !json.access_token) {
+    const msg = json.message || json.error || `HTTP ${tokenRes.status}`;
+    throw new Error(`Token exchange failed: ${msg}`);
+  }
+  return {
+    token: json.access_token,
+    userName: json.user_name || json.user_id || 'Upstox',
+  };
+}
+
 /**
  * Interactive Upstox login (browser OAuth). Resolves with { token, userName }.
  * On success, optionally opens/redirects to successUrl (muhurat UI root).
  */
 function runInteractiveUpstoxLogin(opts = {}) {
-  const envPath = opts.envPath || DEFAULT_ENV_PATH;
+  const creds = upstoxCredentials(opts);
+  const { envPath, apiKey, apiSecret } = creds;
   const fileEnv = loadEnvFile(envPath);
-  const apiKey = opts.apiKey || process.env.UPSTOX_API_KEY || fileEnv.UPSTOX_API_KEY;
-  const apiSecret = opts.apiSecret || process.env.UPSTOX_API_SECRET || fileEnv.UPSTOX_API_SECRET;
   const redirectUri = opts.redirectUri
     || process.env.UPSTOX_REDIRECT_URI
     || fileEnv.UPSTOX_REDIRECT_URI
@@ -114,11 +178,7 @@ function runInteractiveUpstoxLogin(opts = {}) {
   }
 
   const state = crypto.randomBytes(16).toString('hex');
-  const authUrl = new URL('https://api.upstox.com/v2/login/authorization/dialog');
-  authUrl.searchParams.set('response_type', 'code');
-  authUrl.searchParams.set('client_id', apiKey);
-  authUrl.searchParams.set('redirect_uri', redirectUri);
-  authUrl.searchParams.set('state', state);
+  const authUrl = new URL(buildUpstoxAuthUrl({ apiKey, redirectUri, state }));
 
   const port = Number(redirect.port || (redirect.protocol === 'https:' ? 443 : 80));
   const host = redirect.hostname;
@@ -164,28 +224,9 @@ function runInteractiveUpstoxLogin(opts = {}) {
       }
 
       try {
-        const body = new URLSearchParams({
-          code,
-          client_id: apiKey,
-          client_secret: apiSecret,
-          redirect_uri: redirectUri,
-          grant_type: 'authorization_code',
-        });
-        const tokenRes = await fetch('https://api.upstox.com/v2/login/authorization/token', {
-          method: 'POST',
-          headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
-          body,
-        });
-        const json = await tokenRes.json().catch(() => ({}));
-        if (!tokenRes.ok || !json.access_token) {
-          const msg = json.message || json.error || `HTTP ${tokenRes.status}`;
-          res.writeHead(502, { 'Content-Type': 'text/html; charset=utf-8' });
-          res.end(`<p>Could not get an access token: ${msg}</p>`);
-          finish(new Error(`Token exchange failed: ${msg}`));
-          return;
-        }
-        saveTokenToEnv(json.access_token, envPath);
-        const who = json.user_name || json.user_id || 'Upstox';
+        const exchanged = await exchangeUpstoxCode({ code, apiKey, apiSecret, redirectUri });
+        saveTokenToEnv(exchanged.token, envPath);
+        const who = exchanged.userName;
         const go = successUrl
           ? `<p>Logged in as ${who}. Opening Muhurat…</p>
              <p><a href="${successUrl}">${successUrl}</a></p>
@@ -194,7 +235,7 @@ function runInteractiveUpstoxLogin(opts = {}) {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(go);
         if (successUrl) openBrowser(successUrl);
-        finish(null, { token: json.access_token, userName: who, successUrl: successUrl || null });
+        finish(null, { token: exchanged.token, userName: who, successUrl: successUrl || null });
       } catch (e) {
         res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end('<p>Token exchange failed. See the terminal.</p>');
@@ -229,6 +270,11 @@ module.exports = {
   openBrowser,
   isUpstoxAuthError,
   muhuratWebRootUrl,
+  webUpstoxRedirectUri,
+  upstoxCredentials,
+  upstoxLinkStatus,
+  buildUpstoxAuthUrl,
+  exchangeUpstoxCode,
   runInteractiveUpstoxLogin,
   DEFAULT_ENV_PATH,
   DEFAULT_REDIRECT,

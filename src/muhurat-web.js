@@ -7,8 +7,17 @@
 const http = require('http');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 const express = require('express');
 const { WebSocketServer } = require('ws');
+const {
+  upstoxLinkStatus,
+  upstoxCredentials,
+  webUpstoxRedirectUri,
+  buildUpstoxAuthUrl,
+  exchangeUpstoxCode,
+  saveTokenToEnv,
+} = require('./upstox-auth');
 
 function lanHost() {
   for (const list of Object.values(os.networkInterfaces())) {
@@ -182,12 +191,14 @@ function payloadFromState(state) {
   const optSignals = mode === 'both'
     ? userSignalsOf(state && state.optionsBook, state && state.optionsBot)
     : { buys: [], sells: [] };
+  const upstox = upstoxLinkStatus();
   return {
     kind: 'muhurat',
     mode,
     updatedAt: state && state.updatedAt,
     feed: state && state.feed,
     error: state && state.error,
+    upstox,
     book: slimBook(state && state.book),
     optionsBook: mode === 'both' ? slimBook(state && state.optionsBook) : null,
     bot: state && state.bot,
@@ -199,7 +210,95 @@ function payloadFromState(state) {
   };
 }
 
-function startMuhuratWeb({ getState } = {}) {
+function mountUpstoxAuthRoutes(app, { onUpstoxLinked, broadcast } = {}) {
+  const pending = new Map(); // state → { redirectUri, at }
+
+  app.get('/api/auth/upstox', (_req, res) => {
+    res.json({ ok: true, ...upstoxLinkStatus(), linkPath: '/auth/upstox' });
+  });
+
+  app.get('/auth/upstox', (req, res) => {
+    const creds = upstoxCredentials();
+    if (!creds.apiKey || !creds.apiSecret) {
+      res.status(400).type('html').send(
+        '<p>Set UPSTOX_API_KEY and UPSTOX_API_SECRET in .env first.</p><p><a href="/">Back</a></p>'
+      );
+      return;
+    }
+    const redirectUri = webUpstoxRedirectUri();
+    const state = crypto.randomBytes(16).toString('hex');
+    pending.set(state, { redirectUri, at: Date.now() });
+    // Drop stale states (>10 min).
+    for (const [k, v] of pending) {
+      if (Date.now() - v.at > 10 * 60 * 1000) pending.delete(k);
+    }
+    const url = buildUpstoxAuthUrl({ apiKey: creds.apiKey, redirectUri, state });
+    console.log(`Upstox web link started · redirect ${redirectUri}`);
+    res.redirect(url);
+  });
+
+  app.get('/auth/upstox/callback', async (req, res) => {
+    const errParam = req.query.error;
+    const code = req.query.code;
+    const returnedState = String(req.query.state || '');
+    const pendingRow = pending.get(returnedState);
+    pending.delete(returnedState);
+
+    if (errParam) {
+      res.status(400).type('html').send(
+        `<p>Upstox login failed: ${String(errParam)}</p><p><a href="/">Back to Muhurat</a></p>`
+      );
+      return;
+    }
+    if (!code) {
+      res.status(400).type('html').send('<p>Missing auth code.</p><p><a href="/">Back</a></p>');
+      return;
+    }
+    if (!pendingRow) {
+      res.status(400).type('html').send(
+        '<p>Login state expired or did not match. <a href="/auth/upstox">Try again</a>.</p>'
+      );
+      return;
+    }
+
+    try {
+      const creds = upstoxCredentials();
+      const exchanged = await exchangeUpstoxCode({
+        code: String(code),
+        apiKey: creds.apiKey,
+        apiSecret: creds.apiSecret,
+        redirectUri: pendingRow.redirectUri,
+      });
+      saveTokenToEnv(exchanged.token, creds.envPath);
+      if (typeof onUpstoxLinked === 'function') {
+        try { onUpstoxLinked(exchanged); } catch (e) {
+          console.error(`onUpstoxLinked: ${e.message}`);
+        }
+      }
+      if (typeof broadcast === 'function') broadcast();
+      console.log(`Upstox linked via web as ${exchanged.userName}`);
+      res
+        .status(200)
+        .type('html')
+        .send(
+          `<!doctype html><meta charset="utf-8" />
+           <title>Upstox linked</title>
+           <p>Linked as <b>${exchanged.userName}</b>. Token saved.</p>
+           <p><a href="/?linked=1">Open Muhurat</a></p>
+           <script>location.replace('/?linked=1');</script>`
+        );
+    } catch (e) {
+      console.error(`Upstox web callback: ${e.message}`);
+      res.status(502).type('html').send(
+        `<p>${e.message}</p>
+         <p>Register this redirect on the Upstox app: <code>${pendingRow.redirectUri}</code></p>
+         <p><a href="/auth/upstox">Retry</a> · <a href="/">Back</a></p>`
+      );
+    }
+  });
+}
+
+function startMuhuratWeb({ getState, onUpstoxLinked } = {}) {
   const port = webPortOf();
   const app = express();
   const publicDir = path.join(__dirname, '..', 'public');
@@ -213,6 +312,13 @@ function startMuhuratWeb({ getState } = {}) {
   });
   app.get('/api/health', (_req, res) => res.json({ ok: true, app: 'muhurat' }));
 
+  // broadcast assigned after wss setup; auth routes close over the holder.
+  const hub = { broadcast: () => {} };
+  mountUpstoxAuthRoutes(app, {
+    onUpstoxLinked,
+    broadcast: () => hub.broadcast(),
+  });
+
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server });
   const clients = new Set();
@@ -223,20 +329,35 @@ function startMuhuratWeb({ getState } = {}) {
       if (ws.readyState === 1) ws.send(payload);
     }
   };
+  hub.broadcast = broadcast;
 
   wss.on('connection', (ws) => {
     clients.add(ws);
     ws.send(JSON.stringify({ type: 'muhurat', state: payloadFromState(typeof getState === 'function' ? getState() : null) }));
     ws.on('close', () => clients.delete(ws));
+    ws.on('error', () => clients.delete(ws));
   });
+  // Prevent crash: ws re-emits HTTP server listen errors as unhandled 'error' on WSS.
+  wss.on('error', () => {});
 
   let listening = false;
   const ready = new Promise((resolve, reject) => {
-    server.once('error', (err) => {
-      if (!listening) reject(err);
-    });
+    const fail = (err) => {
+      if (listening) return;
+      listening = true; // block double reject
+      const msg = err && err.code === 'EADDRINUSE'
+        ? `Port ${port} already in use — stop the other process (lsof -iTCP:${port} -sTCP:LISTEN) or set MUHURAT_WEB_PORT`
+        : (err && err.message) || String(err);
+      reject(new Error(msg));
+      try { server.close(); } catch (_) { /* ignore */ }
+    };
+    server.on('error', fail);
     server.listen(port, '0.0.0.0', () => {
       listening = true;
+      server.removeListener('error', fail);
+      server.on('error', (err) => {
+        console.error(`Muhurat web server: ${err.message}`);
+      });
       const publicHost = publicHostOf();
       const lan = lanHost();
       const publicUrl = pageUrl(publicHost, port);

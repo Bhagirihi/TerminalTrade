@@ -824,8 +824,16 @@ async function live(opts = {}) {
   };
 
   let web = null;
+  let provider = null;
   try {
-    web = await startMuhuratWeb({ getState: () => state });
+    web = await startMuhuratWeb({
+      getState: () => state,
+      onUpstoxLinked: ({ token, userName }) => {
+        if (provider && token) provider.token = token;
+        state.error = '';
+        console.log(green(bold(`Upstox linked via web as ${userName || 'user'}`)));
+      },
+    });
     console.log(green(bold(`Muhurat web UI (public): ${web.url}`)));
     if (web.publicUrl && web.lanUrl && web.publicUrl !== web.lanUrl) {
       console.log(dim(`LAN: ${web.lanUrl}`));
@@ -833,7 +841,7 @@ async function live(opts = {}) {
     if (web.localUrl && web.localUrl !== web.url) {
       console.log(dim(`Local only: ${web.localUrl}`));
     }
-    console.log(dim('Open Oracle Security List / firewall for TCP ' + web.port + ' if remote users cannot connect.'));
+    console.log(dim('Link Upstox from the UI · open Oracle firewall TCP ' + web.port));
   } catch (e) {
     console.log(amber(`Muhurat web UI unavailable: ${e.message}`));
   }
@@ -887,7 +895,7 @@ async function live(opts = {}) {
     ));
   }
 
-  const provider = new UpstoxProvider(config.upstox.accessToken);
+  provider = new UpstoxProvider(config.upstox.accessToken);
   if (mode === 'both') {
     bot = createMuhuratBot(provider, { mode: 'equity', budget: stockBudget, enforceBudget: true });
     optionsBot = createMuhuratBot(provider, { mode: 'options', budget: optionsBudget, enforceBudget: true });
