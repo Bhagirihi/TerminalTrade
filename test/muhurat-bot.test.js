@@ -2,12 +2,21 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { liveEnabled, CONFIRM, createMuhuratBot, portfolioLossGate } = require('../src/muhurat-bot');
+const {
+  liveEnabled,
+  paperEnabled,
+  tradingEnabled,
+  CONFIRM,
+  createMuhuratBot,
+  portfolioLossGate,
+} = require('../src/muhurat-bot');
 
 test('liveEnabled requires live + confirm + BUY approval', () => {
   const prevLive = process.env.MUHURAT_LIVE;
   const prevConfirm = process.env.MUHURAT_LIVE_CONFIRM;
   const prevBuy = process.env.MUHURAT_BUY_APPROVED;
+  const prevPaper = process.env.MUHURAT_PAPER;
+  delete process.env.MUHURAT_PAPER;
   process.env.MUHURAT_LIVE = 'true';
   process.env.MUHURAT_LIVE_CONFIRM = CONFIRM;
   process.env.MUHURAT_BUY_APPROVED = 'NO';
@@ -22,14 +31,45 @@ test('liveEnabled requires live + confirm + BUY approval', () => {
   else process.env.MUHURAT_LIVE_CONFIRM = prevConfirm;
   if (prevBuy == null) delete process.env.MUHURAT_BUY_APPROVED;
   else process.env.MUHURAT_BUY_APPROVED = prevBuy;
+  if (prevPaper == null) delete process.env.MUHURAT_PAPER;
+  else process.env.MUHURAT_PAPER = prevPaper;
 });
 
-test('createMuhuratBot returns null when live flags off', () => {
+test('paperEnabled arms bot without live flags', () => {
   const prevLive = process.env.MUHURAT_LIVE;
+  const prevPaper = process.env.MUHURAT_PAPER;
+  const prevBuy = process.env.MUHURAT_BUY_APPROVED;
   process.env.MUHURAT_LIVE = 'false';
+  process.env.MUHURAT_BUY_APPROVED = 'NO';
+  delete process.env.MUHURAT_PAPER;
+  assert.equal(paperEnabled(), false);
+  assert.equal(tradingEnabled(), false);
+  assert.equal(createMuhuratBot({}), null);
+  process.env.MUHURAT_PAPER = 'true';
+  assert.equal(paperEnabled(), true);
+  assert.equal(tradingEnabled(), true);
+  const bot = createMuhuratBot({});
+  assert.ok(bot);
+  assert.equal(bot.paper, true);
+  assert.equal(bot.live, false);
+  if (prevLive == null) delete process.env.MUHURAT_LIVE;
+  else process.env.MUHURAT_LIVE = prevLive;
+  if (prevPaper == null) delete process.env.MUHURAT_PAPER;
+  else process.env.MUHURAT_PAPER = prevPaper;
+  if (prevBuy == null) delete process.env.MUHURAT_BUY_APPROVED;
+  else process.env.MUHURAT_BUY_APPROVED = prevBuy;
+});
+
+test('createMuhuratBot returns null when live and paper flags off', () => {
+  const prevLive = process.env.MUHURAT_LIVE;
+  const prevPaper = process.env.MUHURAT_PAPER;
+  process.env.MUHURAT_LIVE = 'false';
+  delete process.env.MUHURAT_PAPER;
   assert.equal(createMuhuratBot({}), null);
   if (prevLive == null) delete process.env.MUHURAT_LIVE;
   else process.env.MUHURAT_LIVE = prevLive;
+  if (prevPaper == null) delete process.env.MUHURAT_PAPER;
+  else process.env.MUHURAT_PAPER = prevPaper;
 });
 
 test('portfolioLossGate blocks near 20% book loss', () => {

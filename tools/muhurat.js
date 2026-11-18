@@ -480,8 +480,11 @@ function renderBookPanel(state, opts = {}) {
   if (lossGate && lossGate.blocked) {
     lines.push(clip(red(bold('DO NOT TRADE')) + red(` · book loss ${lossGate.pnlPct}%`), width));
   }
-  if (state && state.bot && state.bot.live) {
-    lines.push(clip(red(bold('AUTO LIVE')) + dim(` · ${state.bot.product || 'I'} · spend ₹${fmt(state.bot.spend)} · open ${state.bot.openCount || 0}`), width));
+  if (state && state.bot && (state.bot.live || state.bot.paper)) {
+    const modeLabel = state.bot.paper
+      ? amber(bold('AUTO PAPER'))
+      : red(bold('AUTO LIVE'));
+    lines.push(clip(modeLabel + dim(` · ${state.bot.product || 'I'} · spend ₹${fmt(state.bot.spend)} · open ${state.bot.openCount || 0}`), width));
     if (state.bot.lastError) lines.push(clip(red(state.bot.lastError), width));
     for (const p of state.bot.positions || []) {
       lines.push(clip(
@@ -863,37 +866,37 @@ async function live(opts = {}) {
   let stockBudget = defaultStockBudget;
   let optionsBudget = defaultOptionsBudget;
 
-  if (process.env.MUHURAT_LIVE === 'true') {
-    const gateModes = mode === 'both'
-      ? ['equity', 'options']
-      : mode === 'options'
-        ? ['options']
-        : ['equity'];
-    const gate = await askBuyApproval({
-      defaultBudget,
-      defaultStockBudget,
-      defaultOptionsBudget,
-      modes: gateModes,
-    });
-    if (gate.approved) {
-      process.env.MUHURAT_BUY_APPROVED = 'YES';
-      stockBudget = gate.stockBudget || defaultStockBudget;
-      optionsBudget = gate.optionsBudget || defaultOptionsBudget;
-      process.env.MUHURAT_BUDGET = String(gate.budget);
-      process.env.MUHURAT_BUDGET_STOCK = String(stockBudget);
-      process.env.MUHURAT_BUDGET_OPTIONS = String(optionsBudget);
-    } else {
-      process.env.MUHURAT_BUY_APPROVED = 'NO';
-      console.log(amber(gate.reason || 'Watch-only mode.'));
-    }
+  process.env.MUHURAT_BUY_APPROVED = 'NO';
+  delete process.env.MUHURAT_PAPER;
+  const gateModes = mode === 'both'
+    ? ['equity', 'options']
+    : mode === 'options'
+      ? ['options']
+      : ['equity'];
+  const liveAvailable = process.env.MUHURAT_LIVE === 'true';
+  const gate = await askBuyApproval({
+    defaultBudget,
+    defaultStockBudget,
+    defaultOptionsBudget,
+    modes: gateModes,
+    liveAvailable,
+  });
+  if (gate.approved) {
+    process.env.MUHURAT_BUY_APPROVED = 'YES';
+    stockBudget = gate.stockBudget || defaultStockBudget;
+    optionsBudget = gate.optionsBudget || defaultOptionsBudget;
+    process.env.MUHURAT_BUDGET = String(gate.budget);
+    process.env.MUHURAT_BUDGET_STOCK = String(stockBudget);
+    process.env.MUHURAT_BUDGET_OPTIONS = String(optionsBudget);
+  } else if (gate.paper) {
+    process.env.MUHURAT_PAPER = 'true';
+    stockBudget = gate.stockBudget || defaultStockBudget;
+    optionsBudget = gate.optionsBudget || defaultOptionsBudget;
+    process.env.MUHURAT_BUDGET = String(gate.budget);
+    process.env.MUHURAT_BUDGET_STOCK = String(stockBudget);
+    process.env.MUHURAT_BUDGET_OPTIONS = String(optionsBudget);
   } else {
-    console.log(dim(
-      mode === 'both'
-        ? 'MUHURAT_LIVE is not true — stocks+options signals / watch only (no Upstox orders).'
-        : mode === 'options'
-          ? 'MUHURAT_LIVE is not true — Options signals / watch only (no Upstox orders).'
-          : 'MUHURAT_LIVE is not true — signals / watch only (no Upstox orders).'
-    ));
+    console.log(amber(gate.reason || 'Watch-only mode.'));
   }
 
   provider = new UpstoxProvider(config.upstox.accessToken);
@@ -909,8 +912,19 @@ async function live(opts = {}) {
   state.bot = bot ? bot.snapshot() : null;
   state.optionsBot = optionsBot ? optionsBot.snapshot() : null;
 
+  const paperOn = !!(bot && bot.paper) || !!(optionsBot && optionsBot.paper);
   if (bot || optionsBot) {
-    if (mode === 'both') {
+    if (paperOn) {
+      if (mode === 'both') {
+        console.log(amber(bold(
+          `PAPER AUTO (STOCKS+OPTIONS) — stocks ₹${stockBudget.toLocaleString('en-IN')} · options ₹${optionsBudget.toLocaleString('en-IN')} · no Upstox orders. q quit.`
+        )));
+      } else {
+        console.log(amber(bold(
+          `PAPER AUTO${mode === 'options' ? ' (OPTIONS)' : ''} — budget ₹${Number(process.env.MUHURAT_BUDGET).toLocaleString('en-IN')} · simulated fills only. q quit.`
+        )));
+      }
+    } else if (mode === 'both') {
       console.log(red(bold(
         `FULL AUTO ARMED (STOCKS+OPTIONS) — stocks ₹${stockBudget.toLocaleString('en-IN')} (max ${maxTradesPerDay('equity')}/day) · options ₹${optionsBudget.toLocaleString('en-IN')} (max ${maxTradesPerDay('options')}/day). q quit.`
       )));

@@ -264,7 +264,10 @@ function sectionCards(title, rows) {
 function botHtml(bot, label) {
   if (!bot) return '';
   const bits = [];
-  if (bot.live) bits.push(`<div class="meta">FULL AUTO · product ${bot.product || 'I'} · spend ${money(bot.spend)} · open ${bot.openCount || 0}${bot.tradesToday != null ? ' · trades ' + bot.tradesToday + '/' + (bot.maxTrades || '∞') : ''}</div>`);
+  if (bot.live || bot.paper) {
+    const label = bot.paper ? 'PAPER AUTO' : 'FULL AUTO';
+    bits.push(`<div class="meta">${label} · product ${bot.product || 'I'} · spend ${money(bot.spend)} · open ${bot.openCount || 0}${bot.tradesToday != null ? ' · trades ' + bot.tradesToday + '/' + (bot.maxTrades || '∞') : ''}</div>`);
+  }
   for (const p of bot.positions || []) {
     bits.push(`<div class="pos"><b>${p.ticker}</b> qty ${p.qty} · entry ${fmt(p.entry)} · SL ${fmt(p.stop)} · last ${fmt(p.last)} · ${p.stage || ''}</div>`);
   }

@@ -1,8 +1,8 @@
 'use strict';
 
-// Fully automated Muhurat cash trader via Upstox live orders.
-// Requires MUHURAT_LIVE=true, MUHURAT_LIVE_CONFIRM=I_ACCEPT_REAL_ORDERS,
-// and MUHURAT_BUY_APPROVED=YES (set only after interactive YES this run).
+// Fully automated Muhurat cash trader via Upstox live orders — or paper fills.
+// Live: MUHURAT_LIVE=true, MUHURAT_LIVE_CONFIRM=I_ACCEPT_REAL_ORDERS, MUHURAT_BUY_APPROVED=YES.
+// Paper: MUHURAT_PAPER=true (simulated BUY/SELL, no broker orders).
 // Caps spend at MUHURAT_BUDGET. Hard market SELL at 15:15 IST.
 
 const fs = require('fs');
@@ -31,6 +31,15 @@ function liveEnabled() {
     && process.env.MUHURAT_LIVE_CONFIRM === CONFIRM
     && process.env.MUHURAT_BUY_APPROVED === 'YES'
   );
+}
+
+function paperEnabled() {
+  const v = String(process.env.MUHURAT_PAPER || '').trim().toLowerCase();
+  return v === 'true' || v === 'yes' || v === '1';
+}
+
+function tradingEnabled() {
+  return liveEnabled() || paperEnabled();
 }
 
 function productOf() {
@@ -88,7 +97,8 @@ function portfolioLossGate(book) {
 
 function statePath(day, mode = 'equity') {
   const tag = mode === 'options' ? 'options' : 'live';
-  return path.join(PAPER_DIR, `muhurat-${tag}-${day}.json`);
+  const prefix = paperEnabled() && !liveEnabled() ? 'muhurat-paper' : 'muhurat';
+  return path.join(PAPER_DIR, `${prefix}-${tag}-${day}.json`);
 }
 
 function emptyState(day, mode = 'equity') {
@@ -155,9 +165,11 @@ function viewOf(state, phase) {
   const tradesToday = tradesOpenedCount(state);
   const mode = bookModeOf(state.bookMode || state.mode);
   const tradeCap = maxTradesPerDay(mode);
+  const paper = paperEnabled() && !liveEnabled();
   return {
     enabled: true,
-    live: true,
+    live: !paper,
+    paper,
     phase: phase && phase.phase,
     bookMode: mode,
     entered: state.entered,
@@ -175,6 +187,9 @@ function viewOf(state, phase) {
 
 async function placeBuy(provider, pick, product) {
   // Long only — BUY CE / BUY PE / stocks. Never sell-to-open options.
+  if (paperEnabled() && !liveEnabled()) {
+    return { order_id: `PAPER-BUY-${Date.now()}`, paper: true };
+  }
   return provider.placeOrder({
     instrumentToken: pick.key,
     quantity: pick.qty,
@@ -187,6 +202,11 @@ async function placeBuy(provider, pick, product) {
 
 async function placeOrReplaceStop(provider, pos, stop, product) {
   const trigger = roundTick(stop);
+  if (paperEnabled() && !liveEnabled()) {
+    pos.stop = trigger;
+    pos.slOrderId = pos.slOrderId || `PAPER-SL-${Date.now()}`;
+    return;
+  }
   if (pos.slOrderId) {
     try {
       await provider.modifyOrder({
@@ -223,14 +243,19 @@ async function placeOrReplaceStop(provider, pos, stop, product) {
 
 async function marketSell(provider, pos, product) {
   if (pos.slOrderId) {
-    try {
-      await provider.cancelOrder(pos.slOrderId);
-    } catch (_) {
-      /* may already be filled */
+    if (!(paperEnabled() && !liveEnabled())) {
+      try {
+        await provider.cancelOrder(pos.slOrderId);
+      } catch (_) {
+        /* may already be filled */
+      }
     }
     pos.slOrderId = null;
   }
   if (!(pos.qty > 0)) return null;
+  if (paperEnabled() && !liveEnabled()) {
+    return { order_id: `PAPER-SELL-${Date.now()}`, paper: true };
+  }
   return provider.placeOrder({
     instrumentToken: pos.key,
     quantity: pos.qty,
@@ -423,10 +448,11 @@ async function enterFromBook(provider, state, book, product) {
       spent += pos.spend;
       tradesToday += 1;
       state.tradesToday = tradesToday;
-      pushLog(state, `BUY ${pick.ticker} qty ${pick.qty} @~${entry} order ${orderId || '?'} (${tradesToday}/${tradeCap || '∞'})`);
+      const tagBuy = (paperEnabled() && !liveEnabled()) ? 'PAPER BUY' : 'BUY';
+      pushLog(state, `${tagBuy} ${pick.ticker} qty ${pick.qty} @~${entry} order ${orderId || '?'} (${tradesToday}/${tradeCap || '∞'})`);
       try {
         await placeOrReplaceStop(provider, pos, pos.stop, product);
-        pushLog(state, `SL-M ${pick.ticker} @ ${pos.stop}`);
+        pushLog(state, `${(paperEnabled() && !liveEnabled()) ? 'PAPER SL' : 'SL-M'} ${pick.ticker} @ ${pos.stop}`);
       } catch (e) {
         state.lastError = `SL ${pick.ticker}: ${e.message}`;
         pushLog(state, state.lastError);
@@ -530,7 +556,8 @@ async function squareOffAll(provider, state, product) {
 }
 
 function createMuhuratBot(provider, { mode = 'equity', budget, enforceBudget = false } = {}) {
-  if (!liveEnabled()) return null;
+  if (!tradingEnabled()) return null;
+  const paper = paperEnabled() && !liveEnabled();
   const product = productOf();
   const botMode = mode === 'options' ? 'options' : 'equity';
   const budgetLimit = Number(budget) > 0 ? Math.floor(Number(budget)) : budgetOf();
@@ -538,7 +565,8 @@ function createMuhuratBot(provider, { mode = 'equity', budget, enforceBudget = f
 
   return {
     enabled: true,
-    live: true,
+    live: !paper,
+    paper,
     product,
     mode: botMode,
     budget: budgetLimit,
@@ -591,6 +619,8 @@ function createMuhuratBot(provider, { mode = 'equity', budget, enforceBudget = f
 module.exports = {
   createMuhuratBot,
   liveEnabled,
+  paperEnabled,
+  tradingEnabled,
   CONFIRM,
   loadState,
   viewOf,
