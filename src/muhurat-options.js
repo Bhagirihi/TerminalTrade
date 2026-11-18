@@ -17,6 +17,8 @@ const {
   allocateBudget,
   scoreRow,
   maxTradesPerDay,
+  optionsInitialStop,
+  optionsStopLossPct,
 } = require('./muhurat');
 const { screenHolding } = require('./portfolio-screen');
 
@@ -135,7 +137,10 @@ function premiumLevels(premium, tick = 0.05) {
   const entry = Number(premium);
   if (!(entry > 0)) return null;
   const round = (n) => Math.round(n / tick) * tick;
-  const stop = round(Math.max(entry * 0.72, entry - Math.max(entry * 0.28, 8)));
+  // Hard rule: options SL = −5% of premium (env MUHURAT_OPT_SL_PCT).
+  const stop = optionsInitialStop(entry, tick) != null
+    ? optionsInitialStop(entry, tick)
+    : round(entry * (1 - optionsStopLossPct() / 100));
   const t1 = round(entry * 1.22);
   const t2 = round(entry * 1.45);
   const trail = trailPlan(entry, stop, t1, t2, entry, { mode: 'options', armHoldSec: 0 });
@@ -186,7 +191,9 @@ function buildOptionRow({
   let levels = null;
   if (optCandles && optCandles.length >= 15) {
     levels = levelsFromCandles(optCandles, premium, 'options');
-    // Candle-based SL/T1/T2 kept; trail must follow options step-lock rules.
+    // Force options hard SL at −5% of premium (ignore wider/tighter candle stop).
+    const forcedStop = optionsInitialStop(premium, tickSize || 0.05);
+    if (forcedStop != null) levels.stopLoss = r2(forcedStop);
     const trail = trailPlan(premium, levels.stopLoss, levels.target1, levels.target2, premium, {
       mode: 'options',
       armHoldSec: 0,
@@ -525,12 +532,14 @@ async function buildMuhuratOptionsBook(provider, {
     budget: budgetPlan,
     rules: {
       budget: planBudget,
-      pickRule: `Options Live BUY = ATM CE/PE with P > 12, sized in lots · max ${maxTradesPerDay('options') || '∞'} trades/day.`,
+      pickRule: `Options Live BUY CE / BUY PE only (never sell-to-open) · ATM · P > 12 · lots · max ${maxTradesPerDay('options') || '∞'}/day.`,
       maxTrades: maxTradesPerDay('options'),
       underlyings: 'NIFTY 50 + BANKNIFTY only',
-      entry: 'Buy option only if premium holds above session open (when available)',
+      entry: 'BUY CE or BUY PE only if premium holds above session open (when available)',
+      initialStop: `Hard SL −${optionsStopLossPct()}% of premium — exit if down ${optionsStopLossPct()}%`,
+      trailOptions: '+5% → cost · +10% lock · then +5% steps',
       hardExit: `Square off by ${SESSION.exitBy} IST`,
-      instruments: 'Nearest expiry ATM CE and PE',
+      instruments: 'Nearest expiry ATM CE and PE — long premium only',
     },
   };
 }

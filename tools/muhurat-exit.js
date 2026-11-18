@@ -1,21 +1,21 @@
 'use strict';
 
-// Square off today's open Upstox short-term positions (Muhurat day trades).
-// Usage:
-//   npm run muhurat:exit
-//   node tools/muhurat-exit.js --dry-run
+// Square off today's open Upstox short-term positions.
+// Usage: npm run muhurat2 -- --exit
+//        npm run muhurat2 -- --exit --dry-run
 
 const fs = require('fs');
 const path = require('path');
 const { config } = require('../src/config');
 const { UpstoxProvider } = require('../src/data/upstox');
 const { istDateKey, istFullStr } = require('../src/time');
+const { staticIpHint } = require('../src/upstox-ip');
 
 const PAPER_DIR = path.join(__dirname, '..', 'paper');
 const TAG = 'muhurat';
 
-function dryRun() {
-  return process.argv.includes('--dry-run') || process.argv.includes('--Dry');
+function isDryArg(argv = process.argv) {
+  return argv.some((a) => a === '--dry-run' || a === '--Dry' || /^--?dry(-?run)?$/i.test(String(a)));
 }
 
 function num(v) {
@@ -25,6 +25,11 @@ function num(v) {
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function isStaticIpError(err) {
+  const msg = String((err && err.message) || err || '');
+  return /UDAPI1154|static IP/i.test(msg);
 }
 
 function openLegs(rows) {
@@ -78,6 +83,7 @@ async function cancelOpenStops(provider, keys) {
       await sleep(250);
     } catch (e) {
       console.log(`Cancel ${id} failed: ${e.message}`);
+      if (isStaticIpError(e)) throw e;
     }
   }
   return n;
@@ -106,23 +112,27 @@ function markLocalStatesClosed(day) {
   }
 }
 
-async function main() {
-  const dry = dryRun();
-  if (!config.upstox.accessToken) {
-    console.error('UPSTOX_ACCESS_TOKEN missing — run npm run login / Link Upstox first.');
-    process.exit(1);
+/**
+ * Exit all open short-term (day) positions for today.
+ * @returns {{ ok: number, fail: number, legs: object[] }}
+ */
+async function runMuhuratExit(opts = {}) {
+  const dry = opts.dry != null ? Boolean(opts.dry) : isDryArg();
+  const token = opts.accessToken || config.upstox.accessToken;
+  if (!token) {
+    throw new Error('UPSTOX_ACCESS_TOKEN missing — run npm run login / Link Upstox first.');
   }
-  const provider = new UpstoxProvider(config.upstox.accessToken);
+  const provider = opts.provider || new UpstoxProvider(token);
   const day = istDateKey(Date.now());
-  console.log(dry ? `Muhurat EXIT (dry-run) · ${istFullStr(Date.now())}` : `Muhurat EXIT · ${istFullStr(Date.now())}`);
-  console.log(`Day ${day} · squaring off open short-term positions`);
+  console.log(dry ? `Muhurat2 EXIT (dry-run) · ${istFullStr(Date.now())}` : `Muhurat2 EXIT · ${istFullStr(Date.now())}`);
+  console.log(`Day ${day} · square off ALL open short-term positions (stocks + options)`);
 
   const book = await provider.getPortfolio();
   const legs = openLegs(book.positionRows || []);
   if (!legs.length) {
     console.log('No open short-term positions. Nothing to exit.');
     markLocalStatesClosed(day);
-    return;
+    return { ok: 0, fail: 0, legs: [] };
   }
 
   console.log(`Open legs: ${legs.length}`);
@@ -133,11 +143,20 @@ async function main() {
 
   if (dry) {
     console.log('Dry-run only — no orders sent. Re-run without --dry-run to exit.');
-    return;
+    return { ok: 0, fail: 0, legs, dry: true };
   }
 
-  const cancelled = await cancelOpenStops(provider, legs.map((l) => l.key));
-  if (cancelled) console.log(`Cancelled ${cancelled} open stop/order(s).`);
+  try {
+    const cancelled = await cancelOpenStops(provider, legs.map((l) => l.key));
+    if (cancelled) console.log(`Cancelled ${cancelled} open stop/order(s).`);
+  } catch (e) {
+    if (isStaticIpError(e)) {
+      console.error(staticIpHint(e.message) || e.message);
+      console.error('Run on Oracle (whitelisted static IP): npm run muhurat2 -- --exit');
+      throw e;
+    }
+    console.log(`Stop cancel issue (continue): ${e.message}`);
+  }
 
   let ok = 0;
   let fail = 0;
@@ -158,15 +177,35 @@ async function main() {
     } catch (e) {
       fail += 1;
       console.error(`FAIL ${leg.symbol}: ${e.message}`);
+      if (isStaticIpError(e)) {
+        console.error(staticIpHint(e.message) || '');
+        console.error('Run on Oracle: npm run muhurat2 -- --exit');
+        break;
+      }
     }
   }
 
   markLocalStatesClosed(day);
   console.log(`Done · exited ${ok} · failed ${fail}`);
-  if (fail) process.exitCode = 1;
+  return { ok, fail, legs };
 }
 
-main().catch((e) => {
-  console.error(e.message || e);
-  process.exit(1);
-});
+async function main() {
+  try {
+    const result = await runMuhuratExit({ dry: isDryArg() });
+    if (result.fail) process.exitCode = 1;
+  } catch (e) {
+    console.error(e.message || e);
+    process.exit(1);
+  }
+}
+
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  runMuhuratExit,
+  openLegs,
+  isDryArg,
+};

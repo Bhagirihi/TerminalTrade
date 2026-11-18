@@ -88,8 +88,9 @@ test('trailPlan stock: +2.5% arms +1.5% lock (after hold), then +1% steps', () =
 
 test('trailPlan options: +5%→cost, +10%→+10%, +17%→+15%', () => {
   const entry = 100;
-  const init = 80;
+  const init = 95; // −5% hard SL
   assert.equal(trailPlan(entry, init, 122, 145, 104, { mode: 'options' }).trailStage, 0);
+  assert.equal(trailPlan(entry, init, 122, 145, 104, { mode: 'options' }).activeStop, 95);
   assert.equal(trailPlan(entry, init, 122, 145, 105, { mode: 'options' }).activeStop, 100);
   assert.equal(trailPlan(entry, init, 122, 145, 112, { mode: 'options' }).activeStop, 110);
   assert.equal(trailPlan(entry, init, 122, 145, 117, { mode: 'options' }).activeStop, 115);

@@ -15,6 +15,8 @@ const {
   trailPlan,
   stockTrailConfig,
   optionsTrailConfig,
+  optionsInitialStop,
+  optionsStopLossPct,
 } = require('./muhurat');
 const { summarizePortfolio } = require('./portfolio');
 const { staticIpHint } = require('./upstox-ip');
@@ -172,6 +174,7 @@ function viewOf(state, phase) {
 }
 
 async function placeBuy(provider, pick, product) {
+  // Long only — BUY CE / BUY PE / stocks. Never sell-to-open options.
   return provider.placeOrder({
     instrumentToken: pick.key,
     quantity: pick.qty,
@@ -365,6 +368,14 @@ async function enterFromBook(provider, state, book, product) {
       pushLog(state, `Max ${tradeCap} trades/day — stopping new entries`);
       break;
     }
+    // Options: long premium only (BUY CE / BUY PE). Never sell-to-open.
+    if (mode === 'options') {
+      const right = String(pick.right || '').toUpperCase();
+      if (right && right !== 'CE' && right !== 'PE') {
+        pushLog(state, `Skip ${pick.ticker} — options entries are BUY CE/PE only`);
+        continue;
+      }
+    }
     if (state.positions[pick.ticker] && state.positions[pick.ticker].qty > 0 && state.positions[pick.ticker].status !== 'CLOSED') continue;
     // Already traded this ticker today (even if closed) — count as one trade, don't re-enter.
     if (state.positions[pick.ticker] && state.positions[pick.ticker].status === 'CLOSED') continue;
@@ -384,13 +395,19 @@ async function enterFromBook(provider, state, book, product) {
       const placed = await placeBuy(provider, pick, product);
       const orderId = placed && (placed.order_id || placed.orderId);
       const entry = Number(pick.ltp);
+      let initialStop = pick.sellStop || (pick.levels && pick.levels.stopLoss);
+      if (mode === 'options') {
+        const forced = optionsInitialStop(entry, 0.05);
+        if (forced != null) initialStop = forced;
+      }
       const pos = {
         ticker: pick.ticker,
         key: pick.key,
         qty: pick.qty,
         entry,
-        initialStop: pick.sellStop || (pick.levels && pick.levels.stopLoss),
-        stop: pick.sellStop || (pick.levels && pick.levels.stopLoss),
+        right: pick.right || null,
+        initialStop,
+        stop: initialStop,
         t1: pick.sellT1 || (pick.levels && pick.levels.target1),
         t2: pick.sellT2 || (pick.levels && pick.levels.target2),
         buyOrderId: orderId,
@@ -398,7 +415,7 @@ async function enterFromBook(provider, state, book, product) {
         stage: 0,
         peak: entry,
         trailArmAt: null,
-        trailLabel: 'initial SL',
+        trailLabel: mode === 'options' ? `initial SL −${optionsStopLossPct()}%` : 'initial SL',
         spend: Number(pick.spend) || entry * pick.qty,
         status: 'OPEN',
       };
@@ -438,6 +455,26 @@ async function managePositions(provider, state, ltpByKey, product) {
     const ltp = ltpByKey.get(pos.key);
     if (!Number.isFinite(ltp)) continue;
     pos.last = ltp;
+    // Options hard rule: −5% from entry → market exit (backup to SL-M).
+    if (mode === 'options' && Number.isFinite(pos.entry) && pos.entry > 0) {
+      const slPct = optionsStopLossPct();
+      const hardSl = pos.initialStop != null
+        ? Number(pos.initialStop)
+        : pos.entry * (1 - slPct / 100);
+      if (Number.isFinite(hardSl) && ltp <= hardSl + 1e-9) {
+        try {
+          await marketSell(provider, pos, product);
+          pos.qty = 0;
+          pos.status = 'CLOSED';
+          pos.exitReason = `SL-${slPct}%`;
+          pushLog(state, `SELL ${pos.ticker} SL −${slPct}% @~${ltp} (BUY ${pos.right || 'CE/PE'} exit only)`);
+        } catch (e) {
+          state.lastError = `SL exit ${pos.ticker}: ${e.message}`;
+          pushLog(state, state.lastError);
+        }
+        continue;
+      }
+    }
     const trail = positionTrail(pos, ltp, mode);
     pos.peak = trail.peak;
     pos.trailArmAt = trail.trailArmAt;
@@ -458,7 +495,7 @@ async function managePositions(provider, state, ltpByKey, product) {
         }
       }
     }
-    // Soft take-profit at T2: market sell
+    // Soft take-profit at T2: market sell (closes long BUY CE/PE — not sell-to-open)
     if (Number.isFinite(pos.t2) && ltp >= pos.t2) {
       try {
         await marketSell(provider, pos, product);

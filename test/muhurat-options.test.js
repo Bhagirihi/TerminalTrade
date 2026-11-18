@@ -12,9 +12,9 @@ const {
 } = require('../src/muhurat-options');
 const { isOptionsArg, render } = require('../tools/muhurat');
 
-test('premiumLevels puts stop below premium and targets above', () => {
+test('premiumLevels uses −5% hard SL and targets above', () => {
   const lv = premiumLevels(100);
-  assert.ok(lv.stopLoss < 100);
+  assert.equal(lv.stopLoss, 95);
   assert.ok(lv.target1 > 100);
   assert.ok(lv.target2 >= lv.target1);
 });
@@ -124,7 +124,7 @@ test('isOptionsArg detects --Options', () => {
   const prev = process.argv.slice();
   process.argv = ['node', 'tools/muhurat.js', '--Options'];
   assert.equal(isOptionsArg(), true);
-  process.argv = ['node', 'tools/muhurat2.js', '--option'];
+  process.argv = ['node', 'tools/muhurat.js', '--option'];
   assert.equal(isOptionsArg(), true);
   process.argv = prev;
 });

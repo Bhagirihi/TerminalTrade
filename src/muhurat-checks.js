@@ -1,6 +1,6 @@
 'use strict';
 
-// Pre-flight checkpoints before `npm run muhurat`.
+// Pre-flight checkpoints before `npm run muhurat2`.
 // Hard fails stop the run. Warns print but allow continue.
 
 const { config } = require('./config');
@@ -179,7 +179,7 @@ function checkSessionClock() {
 
 function checkRulesAck() {
   const rows = [
-    ok('TRAIL', 'Trail: @T1→cost · @+0.6%→+0.3% · hard exit 3:15'),
+    ok('TRAIL', 'Options SL −5% · trail +5%→cost · +10% lock · stocks +2.5%→+1.5% · hard exit 3:15'),
     ok('PICKS', `Live picks = BUY + Watch P>12 · stock max ${maxTradesPerDay('equity') || '∞'}/day · options max ${maxTradesPerDay('options') || '∞'}/day`),
     ok('NO_TRADE_LOSS', `If book loss ≥ −${noTradeLossPct()}% (near 20%) → DO NOT TRADE`),
   ];

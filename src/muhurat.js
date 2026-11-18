@@ -320,12 +320,26 @@ function stockTrailConfig() {
   };
 }
 
-// Options: +5% → cost; +10% → +10% floor; then each +5% raises floor +5%.
+// Options: initial SL −5% of premium; trail +5% → cost; +10% → +10%; then +5% steps.
+function optionsStopLossPct() {
+  return envPct('MUHURAT_OPT_SL_PCT', 5);
+}
+
+function optionsInitialStop(entry, tick = 0.05) {
+  const e = Number(entry);
+  if (!(e > 0)) return null;
+  const pct = optionsStopLossPct();
+  const raw = e * (1 - pct / 100);
+  const step = Number(tick) > 0 ? Number(tick) : 0.05;
+  return Math.round(raw / step) * step;
+}
+
 function optionsTrailConfig() {
   return {
     bePct: envPct('MUHURAT_OPT_BE_PCT', 5),
     lockFirstPct: envPct('MUHURAT_OPT_LOCK_FIRST_PCT', 10),
     stepPct: envPct('MUHURAT_OPT_STEP_PCT', 5),
+    stopLossPct: optionsStopLossPct(),
   };
 }
 
@@ -1160,6 +1174,8 @@ module.exports = {
   trailPlan,
   stockTrailConfig,
   optionsTrailConfig,
+  optionsStopLossPct,
+  optionsInitialStop,
   allocateBudget,
   pickTopProfitBuys,
   profitMetrics,

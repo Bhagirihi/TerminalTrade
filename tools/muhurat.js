@@ -21,6 +21,7 @@ const {
   muhuratWebRootUrl,
   runInteractiveUpstoxLogin,
 } = require('../src/upstox-auth');
+const { runMuhuratExit, isDryArg } = require('./muhurat-exit');
 
 function isBothArg() {
   // Supports: --both / --all / Both, plus MUHURAT_MODE=both (muhurat2 default).
@@ -1115,13 +1116,29 @@ async function runDemo() {
   const blockedState = buildDemoState('blocked');
   console.log(render(blockedState, { width, height, fill: false, log: 'DEMO scene 2 · loss gate blocks new buys' }));
   console.log('');
-  console.log(dim('End of demo. Real session: npm run muhurat   (type YES only if you want live money)'));
+  console.log(dim('End of demo. Real session: npm run muhurat2   (type YES only if you want live money)'));
+}
+
+function isExitArg() {
+  return process.argv.some((a) => {
+    const s = String(a);
+    return (
+      s === '--exit'
+      || s === '--Exit'
+      || s === 'exit'
+      || s === 'Exit'
+      || /^--?exit(-?all)?$/i.test(s)
+      || s === '--square-off'
+      || s === '--flatten'
+    );
+  });
 }
 
 if (require.main === module) {
   const onceMode = process.argv.includes('--once');
   const checksOnly = process.argv.includes('--checks-only');
   const skip = process.argv.includes('--skip-checks');
+  const exitAll = isExitArg();
   const demoMode = isDemoArg();
   const mode = resolveRunMode();
   const opts = { skip, mode };
@@ -1129,6 +1146,11 @@ if (require.main === module) {
     if (demoMode) {
       await runDemo();
       return;
+    }
+    if (exitAll) {
+      console.log(amber(bold('Muhurat2 EXIT — square off ALL today\'s open day trades.')));
+      const result = await runMuhuratExit({ dry: isDryArg() });
+      process.exit(result.fail ? 1 : 0);
     }
     if (checksOnly) {
       const report = await runMuhuratChecks();
@@ -1155,6 +1177,7 @@ module.exports = {
   runCheckpoints,
   runDemo,
   isDemoArg,
+  isExitArg,
   isOptionsArg,
   isBothArg,
   isStocksOnlyArg,
