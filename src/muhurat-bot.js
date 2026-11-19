@@ -20,6 +20,12 @@ const {
 } = require('./muhurat');
 const { summarizePortfolio } = require('./portfolio');
 const { staticIpHint } = require('./upstox-ip');
+const {
+  appendLog,
+  recordBuy,
+  recordSell,
+  syncFromBotState,
+} = require('./muhurat-history');
 
 const PAPER_DIR = path.join(__dirname, '..', 'paper');
 const TAG = 'muhurat';
@@ -149,11 +155,27 @@ function saveState(state) {
   fs.mkdirSync(PAPER_DIR, { recursive: true });
   const mode = bookModeOf(state.bookMode || state.mode);
   fs.writeFileSync(statePath(state.date, mode), JSON.stringify(state, null, 2));
+  try {
+    syncFromBotState(state);
+  } catch (_) {
+    /* history is best-effort */
+  }
 }
 
 function pushLog(state, msg) {
-  state.log.push({ at: new Date().toISOString(), msg });
+  const at = new Date().toISOString();
+  state.log.push({ at, msg });
   if (state.log.length > 80) state.log = state.log.slice(-80);
+  try {
+    appendLog({
+      day: state.date,
+      mode: bookModeOf(state.bookMode || state.mode),
+      msg,
+      at,
+    });
+  } catch (_) {
+    /* history is best-effort */
+  }
 }
 
 function roundTick(n, tick = 0.05) {
@@ -467,10 +489,12 @@ async function enterFromBook(provider, state, book, product) {
         const forced = optionsInitialStop(entry, 0.05);
         if (forced != null) initialStop = forced;
       }
+      const buyAt = new Date().toISOString();
       const pos = {
         ticker: pick.ticker,
         key: pick.key,
         qty: pick.qty,
+        closedQty: pick.qty,
         entry,
         right: pick.right || null,
         initialStop,
@@ -485,11 +509,27 @@ async function enterFromBook(provider, state, book, product) {
         trailLabel: mode === 'options' ? `initial SL −${optionsStopLossPct()}%` : 'initial SL',
         spend: Number(pick.spend) || entry * pick.qty,
         status: 'OPEN',
+        buyAt,
       };
       state.positions[pick.ticker] = pos;
       spent += pos.spend;
       tradesToday += 1;
       state.tradesToday = tradesToday;
+      try {
+        recordBuy({
+          day: state.date,
+          mode,
+          ticker: pos.ticker,
+          key: pos.key,
+          qty: pos.qty,
+          entry: pos.entry,
+          spend: pos.spend,
+          right: pos.right,
+          at: buyAt,
+        });
+      } catch (_) {
+        /* history is best-effort */
+      }
       const tagBuy = (paperEnabled() && !liveEnabled()) ? 'PAPER BUY' : 'BUY';
       pushLog(state, `${tagBuy} ${pick.ticker} qty ${pick.qty} @~${entry} order ${orderId || '?'} (${tradesToday}/${tradeCap || '∞'})`);
       try {
@@ -516,12 +556,35 @@ async function enterFromBook(provider, state, book, product) {
   state.entered = Object.values(state.positions).some((p) => p.qty > 0);
 }
 
-function markClosed(pos, reason) {
+function markClosed(pos, reason, { day, mode, ltp } = {}) {
+  const exitPx = Number.isFinite(Number(ltp)) ? Number(ltp) : Number(pos.last);
+  if (Number.isFinite(exitPx)) pos.last = exitPx;
+  if (!(pos.closedQty > 0) && pos.qty > 0) pos.closedQty = pos.qty;
   pos.qty = 0;
   pos.status = 'CLOSED';
   pos.exiting = false;
   pos.slOrderId = null;
   pos.exitReason = reason;
+  pos.sellAt = new Date().toISOString();
+  if (day && pos.ticker) {
+    try {
+      recordSell({
+        day,
+        mode: mode || 'equity',
+        ticker: pos.ticker,
+        key: pos.key,
+        qty: pos.closedQty || 0,
+        entry: pos.entry,
+        exit: exitPx,
+        spend: pos.spend,
+        exitReason: reason,
+        right: pos.right,
+        at: pos.sellAt,
+      });
+    } catch (_) {
+      /* history is best-effort */
+    }
+  }
 }
 
 async function managePositions(provider, state, ltpByKey, product) {
@@ -540,7 +603,7 @@ async function managePositions(provider, state, ltpByKey, product) {
       if (Number.isFinite(hardSl) && ltp <= hardSl + 1e-9) {
         try {
           await marketSell(provider, pos, product);
-          markClosed(pos, `SL-${slPct}%`);
+          markClosed(pos, `SL-${slPct}%`, { day: state.date, mode, ltp });
           pushLog(state, `SELL ${pos.ticker} SL −${slPct}% @~${ltp} (BUY ${pos.right || 'CE/PE'} exit only)`);
         } catch (e) {
           state.lastError = `SL exit ${pos.ticker}: ${e.message}`;
@@ -573,7 +636,7 @@ async function managePositions(provider, state, ltpByKey, product) {
     if (Number.isFinite(pos.t2) && ltp >= pos.t2) {
       try {
         await marketSell(provider, pos, product);
-        markClosed(pos, 'T2');
+        markClosed(pos, 'T2', { day: state.date, mode, ltp });
         pushLog(state, `SELL ${pos.ticker} T2 hit @~${ltp}`);
       } catch (e) {
         state.lastError = `T2 sell ${pos.ticker}: ${e.message}`;
@@ -590,7 +653,11 @@ async function squareOffAll(provider, state, product) {
     try {
       const qty = pos.qty;
       await marketSell(provider, pos, product);
-      markClosed(pos, '15:15');
+      markClosed(pos, '15:15', {
+        day: state.date,
+        mode: bookModeOf(state.bookMode || state.mode),
+        ltp: pos.last,
+      });
       pushLog(state, `SQUARE-OFF ${pos.ticker} qty ${qty}`);
     } catch (e) {
       state.lastError = `Square-off ${pos.ticker}: ${e.message}`;

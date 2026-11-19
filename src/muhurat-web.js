@@ -18,6 +18,7 @@ const {
   exchangeUpstoxCode,
   saveTokenToEnv,
 } = require('./upstox-auth');
+const { listDays, dayDetail, readLogs } = require('./muhurat-history');
 
 function lanHost() {
   for (const list of Object.values(os.networkInterfaces())) {
@@ -303,12 +304,37 @@ function startMuhuratWeb({ getState, onUpstoxLinked } = {}) {
   const app = express();
   const publicDir = path.join(__dirname, '..', 'public');
   const muhuratPage = path.join(publicDir, 'muhurat.html');
+  const logsPage = path.join(publicDir, 'muhurat-logs.html');
   // Root = Muhurat UI (not public/index.html Supertrend page).
   app.get('/', (_req, res) => res.sendFile(muhuratPage));
   app.get('/muhurat.html', (_req, res) => res.redirect(301, '/'));
+  app.get('/muhuratlogs', (_req, res) => res.sendFile(logsPage));
+  app.get('/muhurat-logs.html', (_req, res) => res.redirect(301, '/muhuratlogs'));
   app.use(express.static(publicDir, { index: false }));
   app.get('/api/muhurat', (_req, res) => {
     res.json(payloadFromState(typeof getState === 'function' ? getState() : null));
+  });
+  app.get('/api/muhurat/days', (req, res) => {
+    const limit = Number(req.query.limit) || 60;
+    res.json({ ok: true, days: listDays({ limit }) });
+  });
+  app.get('/api/muhurat/days/:day', (req, res) => {
+    const day = String(req.params.day || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+      res.status(400).json({ ok: false, error: 'day must be YYYY-MM-DD' });
+      return;
+    }
+    res.json({ ok: true, day: dayDetail(day) });
+  });
+  app.get('/api/muhurat/logs', (req, res) => {
+    const day = String(req.query.day || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+      res.status(400).json({ ok: false, error: 'day query required (YYYY-MM-DD)' });
+      return;
+    }
+    const limit = Number(req.query.limit) || 500;
+    const mode = req.query.mode || null;
+    res.json({ ok: true, day, logs: readLogs(day, { limit, mode }) });
   });
   app.get('/api/health', (_req, res) => res.json({ ok: true, app: 'muhurat' }));
 
