@@ -201,6 +201,7 @@ async function placeBuy(provider, pick, product) {
 }
 
 async function placeOrReplaceStop(provider, pos, stop, product) {
+  if (!pos || pos.status === 'CLOSED' || pos.exiting || !(pos.qty > 0)) return;
   const trigger = roundTick(stop);
   if (paperEnabled() && !liveEnabled()) {
     pos.stop = trigger;
@@ -241,29 +242,70 @@ async function placeOrReplaceStop(provider, pos, stop, product) {
   pos.stop = trigger;
 }
 
-async function marketSell(provider, pos, product) {
-  if (pos.slOrderId) {
-    if (!(paperEnabled() && !liveEnabled())) {
-      try {
-        await provider.cancelOrder(pos.slOrderId);
-      } catch (_) {
-        /* may already be filled */
-      }
-    }
+async function cancelStopOrder(provider, pos) {
+  if (!pos || !pos.slOrderId) return false;
+  if (paperEnabled() && !liveEnabled()) {
     pos.slOrderId = null;
+    return true;
   }
+  try {
+    await provider.cancelOrder(pos.slOrderId);
+    pos.slOrderId = null;
+    return true;
+  } catch (_) {
+    pos.slOrderId = null;
+    return false; // may already be filled — check net qty before another SELL
+  }
+}
+
+async function netQtyOpen(provider, instrumentToken) {
+  if (!provider || typeof provider.getPositions !== 'function') return null;
+  try {
+    const rows = await provider.getPositions();
+    const list = Array.isArray(rows) ? rows : [];
+    let net = 0;
+    for (const r of list) {
+      const key = r.instrument_token || r.instrumentToken || r.key;
+      if (String(key) !== String(instrumentToken)) continue;
+      const q = Number(r.quantity != null ? r.quantity : r.net_quantity != null ? r.net_quantity : r.netQty);
+      if (Number.isFinite(q)) net += q;
+    }
+    return net;
+  } catch (_) {
+    return null;
+  }
+}
+
+// One exit only: cancel resting SL-M first, then a single market SELL.
+// If SL-M already filled (cancel fails / net qty 0), skip — avoids naked short.
+async function marketSell(provider, pos, product) {
+  if (!pos || pos.status === 'CLOSED' || pos.exiting) return null;
   if (!(pos.qty > 0)) return null;
+  pos.exiting = true;
+  const cancelled = await cancelStopOrder(provider, pos);
+  if (!cancelled && !(paperEnabled() && !liveEnabled())) {
+    const net = await netQtyOpen(provider, pos.key);
+    if (net != null && net <= 0) {
+      pos.qty = 0;
+      return { order_id: null, alreadyFlat: true };
+    }
+  }
   if (paperEnabled() && !liveEnabled()) {
     return { order_id: `PAPER-SELL-${Date.now()}`, paper: true };
   }
-  return provider.placeOrder({
-    instrumentToken: pos.key,
-    quantity: pos.qty,
-    transactionType: 'SELL',
-    orderType: 'MARKET',
-    product,
-    tag: TAG,
-  });
+  try {
+    return await provider.placeOrder({
+      instrumentToken: pos.key,
+      quantity: pos.qty,
+      transactionType: 'SELL',
+      orderType: 'MARKET',
+      product,
+      tag: TAG,
+    });
+  } catch (e) {
+    pos.exiting = false; // allow retry if broker rejected
+    throw e;
+  }
 }
 
 function positionTrail(pos, ltp, mode, now = Date.now()) {
@@ -474,14 +516,22 @@ async function enterFromBook(provider, state, book, product) {
   state.entered = Object.values(state.positions).some((p) => p.qty > 0);
 }
 
+function markClosed(pos, reason) {
+  pos.qty = 0;
+  pos.status = 'CLOSED';
+  pos.exiting = false;
+  pos.slOrderId = null;
+  pos.exitReason = reason;
+}
+
 async function managePositions(provider, state, ltpByKey, product) {
   const mode = bookModeOf(state.bookMode || state.mode);
   for (const pos of Object.values(state.positions)) {
-    if (!pos || !(pos.qty > 0) || pos.status === 'CLOSED') continue;
+    if (!pos || !(pos.qty > 0) || pos.status === 'CLOSED' || pos.exiting) continue;
     const ltp = ltpByKey.get(pos.key);
     if (!Number.isFinite(ltp)) continue;
     pos.last = ltp;
-    // Options hard rule: −5% from entry → market exit (backup to SL-M).
+    // Options hard rule: −5% from entry → cancel SL-M then one market exit.
     if (mode === 'options' && Number.isFinite(pos.entry) && pos.entry > 0) {
       const slPct = optionsStopLossPct();
       const hardSl = pos.initialStop != null
@@ -490,9 +540,7 @@ async function managePositions(provider, state, ltpByKey, product) {
       if (Number.isFinite(hardSl) && ltp <= hardSl + 1e-9) {
         try {
           await marketSell(provider, pos, product);
-          pos.qty = 0;
-          pos.status = 'CLOSED';
-          pos.exitReason = `SL-${slPct}%`;
+          markClosed(pos, `SL-${slPct}%`);
           pushLog(state, `SELL ${pos.ticker} SL −${slPct}% @~${ltp} (BUY ${pos.right || 'CE/PE'} exit only)`);
         } catch (e) {
           state.lastError = `SL exit ${pos.ticker}: ${e.message}`;
@@ -525,9 +573,7 @@ async function managePositions(provider, state, ltpByKey, product) {
     if (Number.isFinite(pos.t2) && ltp >= pos.t2) {
       try {
         await marketSell(provider, pos, product);
-        pos.qty = 0;
-        pos.status = 'CLOSED';
-        pos.exitReason = 'T2';
+        markClosed(pos, 'T2');
         pushLog(state, `SELL ${pos.ticker} T2 hit @~${ltp}`);
       } catch (e) {
         state.lastError = `T2 sell ${pos.ticker}: ${e.message}`;
@@ -540,13 +586,12 @@ async function managePositions(provider, state, ltpByKey, product) {
 async function squareOffAll(provider, state, product) {
   if (state.squaredOff) return;
   for (const pos of Object.values(state.positions)) {
-    if (!pos || !(pos.qty > 0) || pos.status === 'CLOSED') continue;
+    if (!pos || !(pos.qty > 0) || pos.status === 'CLOSED' || pos.exiting) continue;
     try {
+      const qty = pos.qty;
       await marketSell(provider, pos, product);
-      pushLog(state, `SQUARE-OFF ${pos.ticker} qty ${pos.qty}`);
-      pos.qty = 0;
-      pos.status = 'CLOSED';
-      pos.exitReason = '15:15';
+      markClosed(pos, '15:15');
+      pushLog(state, `SQUARE-OFF ${pos.ticker} qty ${qty}`);
     } catch (e) {
       state.lastError = `Square-off ${pos.ticker}: ${e.message}`;
       pushLog(state, state.lastError);

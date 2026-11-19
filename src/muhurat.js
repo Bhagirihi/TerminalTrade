@@ -765,7 +765,15 @@ function withTradeSignals(row, phaseInfo) {
 
   row.entry = entry;
   row.buy = row.verdict === 'BUY' ? 'YES' : (row.verdict === 'PREP' ? 'LATER' : 'NO');
-  row.sellStop = lv.activeStop != null ? lv.activeStop : lv.stopLoss;
+  let sellStop = lv.activeStop != null ? lv.activeStop : lv.stopLoss;
+  // Long options signal: SL must stay below LTP (never show a stop above the quote).
+  if (trailModeOf(row.mode) === 'options' && Number.isFinite(row.ltp) && row.ltp > 0
+    && Number.isFinite(sellStop) && sellStop >= row.ltp
+    && row.positionEntry == null && row.filledEntry == null) {
+    const forced = optionsInitialStop(row.ltp, 0.05);
+    sellStop = forced != null ? forced : r2(row.ltp * (1 - optionsStopLossPct() / 100));
+  }
+  row.sellStop = sellStop;
   row.sellT1 = lv.target1;
   row.sellT2 = lv.target2;
   row.action = action;
@@ -784,10 +792,23 @@ function applyLiveLtp(row, ltp, phaseInfo, mode) {
   if (!row || !Number.isFinite(ltp) || ltp <= 0) return row;
   const next = { ...row, ltp: r2(ltp), live: true };
   const lv = { ...(row.levels || {}) };
-  const entryRef = lv.entry != null ? lv.entry : ltp;
   const trailMode = trailModeOf(mode || row.mode || 'equity');
+  // Signal cards (not a filled bot position): planned entry tracks live LTP.
+  // Otherwise options SL can stick above LTP after premium drops (e.g. LTP 138, SL 155).
+  const filled = row.positionEntry != null || row.filledEntry != null;
+  let entryRef = filled
+    ? Number(row.positionEntry != null ? row.positionEntry : row.filledEntry)
+    : ltp;
+  if (!(entryRef > 0)) entryRef = lv.entry != null ? lv.entry : ltp;
+  let stopLoss = lv.stopLoss;
+  if (trailMode === 'options' && !filled) {
+    entryRef = ltp;
+    const forced = optionsInitialStop(ltp, 0.05);
+    stopLoss = forced != null ? forced : r2(ltp * (1 - optionsStopLossPct() / 100));
+    lv.stopLoss = stopLoss;
+  }
   // Preview uses armHoldSec=0 so cards show the lock immediately at the arm price.
-  const trail = trailPlan(entryRef, lv.stopLoss, lv.target1, lv.target2, ltp, {
+  const trail = trailPlan(entryRef, stopLoss, lv.target1, lv.target2, filled ? ltp : entryRef, {
     mode: trailMode,
     armHoldSec: 0,
   });
