@@ -3,3 +3,4 @@ node_modules/
 paper/
 cache/
 .DS_Store
+public/muhurat-data/day-*.json

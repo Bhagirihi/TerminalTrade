@@ -9,10 +9,15 @@ const path = require('path');
 const ROOT = path.join(__dirname, '..', 'paper', 'muhurat-history');
 const LOGS_DIR = path.join(ROOT, 'logs');
 const DAYS_DIR = path.join(ROOT, 'days');
+// Served by Supertrend static on :3000 so /muhuratlogs works without Muhurat owning the port.
+const PUBLIC_DATA_DIR = path.join(__dirname, '..', 'public', 'muhurat-data');
+
+let publishTimer = null;
 
 function ensureDirs() {
   fs.mkdirSync(LOGS_DIR, { recursive: true });
   fs.mkdirSync(DAYS_DIR, { recursive: true });
+  fs.mkdirSync(PUBLIC_DATA_DIR, { recursive: true });
 }
 
 function dayFile(day) {
@@ -74,6 +79,38 @@ function saveDay(doc) {
   if (!doc || !doc.date) return;
   doc.updatedAt = new Date().toISOString();
   writeJson(dayFile(doc.date), doc);
+  schedulePublishPublic();
+}
+
+/** Write JSON snapshots under public/muhurat-data for Supertrend static hosting. */
+function publishPublicSnapshot() {
+  ensureDirs();
+  const days = listDays({ limit: 90 });
+  writeJson(path.join(PUBLIC_DATA_DIR, 'days.json'), {
+    ok: true,
+    updatedAt: new Date().toISOString(),
+    days,
+  });
+  for (const row of days) {
+    if (!row || !row.date) continue;
+    writeJson(path.join(PUBLIC_DATA_DIR, `day-${row.date}.json`), {
+      ok: true,
+      day: dayDetail(row.date),
+    });
+  }
+  return { days: days.length };
+}
+
+function schedulePublishPublic() {
+  if (publishTimer) clearTimeout(publishTimer);
+  publishTimer = setTimeout(() => {
+    publishTimer = null;
+    try {
+      publishPublicSnapshot();
+    } catch (_) {
+      /* best-effort */
+    }
+  }, 750);
 }
 
 function appendLog({ day, msg, mode, at } = {}) {
@@ -85,6 +122,7 @@ function appendLog({ day, msg, mode, at } = {}) {
     msg: String(msg),
   };
   fs.appendFileSync(logFile(day), `${JSON.stringify(row)}\n`);
+  schedulePublishPublic();
 }
 
 function readLogs(day, { limit = 500, mode } = {}) {
@@ -372,11 +410,17 @@ function backfillFromPaperStates() {
       /* skip bad file */
     }
   }
+  try {
+    publishPublicSnapshot();
+  } catch (_) {
+    /* ignore */
+  }
   return { days };
 }
 
 module.exports = {
   ROOT,
+  PUBLIC_DATA_DIR,
   appendLog,
   readLogs,
   loadDay,
@@ -386,5 +430,6 @@ module.exports = {
   recordSell,
   syncFromBotState,
   backfillFromPaperStates,
+  publishPublicSnapshot,
   emptyDay,
 };

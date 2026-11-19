@@ -130,13 +130,24 @@ const timeOf = (iso) => {
 
 let selected = null;
 
+async function fetchJson(urls) {
+  for (const url of urls) {
+    try {
+      const r = await fetch(url, { cache: 'no-store' });
+      if (!r.ok) continue;
+      return await r.json();
+    } catch (_) { /* try next */ }
+  }
+  return null;
+}
+
 async function loadDays() {
   const box = document.getElementById('days');
   try {
-    const j = await fetch('/api/muhurat/days').then((r) => r.json());
+    const j = await fetchJson(['/api/muhurat/days', '/muhurat-data/days.json']);
     const days = (j && j.days) || [];
     if (!days.length) {
-      box.innerHTML = '<p class="empty">No history yet — run muhurat2 and trades/logs will appear here.</p>';
+      box.innerHTML = '<p class="empty">No history yet — run muhurat2 on Oracle and trades/logs will appear here.</p>';
       return;
     }
     box.innerHTML = days.map((d) => `
@@ -164,9 +175,9 @@ async function openDay(day) {
   panel.hidden = false;
   document.getElementById('detailTitle').textContent = day;
   try {
-    const j = await fetch(`/api/muhurat/days/${day}`).then((r) => r.json());
+    const j = await fetchJson([`/api/muhurat/days/${day}`, `/muhurat-data/day-${day}.json`]);
     const d = j && j.day;
-    if (!d) throw new Error('empty');
+    if (!d) throw new Error('No day data yet — is muhurat2 running after git pull?');
     const eq = (d.byMode && d.byMode.equity) || {};
     const op = (d.byMode && d.byMode.options) || {};
     document.getElementById('stats').innerHTML = `

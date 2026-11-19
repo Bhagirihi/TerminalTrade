@@ -306,15 +306,14 @@ function mountUpstoxAuthRoutes(app, { onUpstoxLinked, broadcast } = {}) {
 
 /** Mount /muhuratlogs + history APIs on any Express app (Muhurat UI or main dashboard). */
 function mountMuhuratHistoryRoutes(app, { publicDir } = {}) {
-  const dir = publicDir || path.join(__dirname, '..', 'public');
-  const logsPage = path.join(dir, 'muhurat-logs.html');
   try {
     backfillFromPaperStates();
   } catch (_) {
     /* best-effort seed from existing bot state files */
   }
-  app.get('/muhuratlogs', (_req, res) => res.sendFile(logsPage));
-  app.get('/muhurat-logs.html', (_req, res) => res.redirect(301, '/muhuratlogs'));
+  // Prefer /muhuratlogs/ (static folder) so Supertrend on :3000 can serve it too.
+  app.get('/muhuratlogs', (_req, res) => res.redirect(302, '/muhuratlogs/'));
+  app.get('/muhurat-logs.html', (_req, res) => res.redirect(302, '/muhuratlogs/'));
   app.get('/api/muhurat/days', (req, res) => {
     const limit = Number(req.query.limit) || 60;
     res.json({ ok: true, days: listDays({ limit }) });

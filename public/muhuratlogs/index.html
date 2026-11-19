@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0c121c" />
+<title>Muhurat2 · Logs & P&L</title>
+<style>
+  :root {
+    --bg:#0c121c; --panel:#141c2b; --line:#243044; --txt:#e8edf5; --dim:#8b97ab;
+    --green:#22c55e; --red:#ef4444; --amber:#f59e0b; --blue:#5b9fd4;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; min-height:100vh; color:var(--txt);
+    font-family:"IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+    background:
+      radial-gradient(1200px 500px at 10% -10%, rgba(91,159,212,.14), transparent 55%),
+      linear-gradient(180deg, #0a1018 0%, var(--bg) 40%, #0b1420 100%);
+  }
+  header {
+    display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between;
+    padding:14px max(16px, env(safe-area-inset-right)) 12px max(16px, env(safe-area-inset-left));
+    border-bottom:1px solid rgba(36,48,68,.9);
+    position:sticky; top:0; z-index:5;
+    background:rgba(12,18,28,.9); backdrop-filter:blur(10px);
+  }
+  h1 { margin:0; font-size:20px; font-weight:700; letter-spacing:-.03em; }
+  .sub { color:var(--dim); font-size:12.5px; margin-top:2px; }
+  .btn {
+    appearance:none; border:1px solid rgba(91,159,212,.45);
+    background:linear-gradient(180deg, #1a2a3d, #132033);
+    color:var(--txt); font:inherit; font-size:13px; font-weight:650;
+    padding:8px 14px; border-radius:10px; cursor:pointer; text-decoration:none;
+    display:inline-flex; align-items:center;
+  }
+  .btn.ghost { background:transparent; border-color:var(--line); color:var(--dim); }
+  main {
+    padding:16px max(16px, env(safe-area-inset-right)) calc(28px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+    display:grid; gap:14px; max-width:1100px; margin:0 auto;
+  }
+  .panel {
+    background:rgba(20,28,43,.92); border:1px solid var(--line); border-radius:14px; padding:14px 16px;
+  }
+  .panel h2 {
+    margin:0 0 10px; font-size:12px; font-weight:700; color:var(--dim);
+    text-transform:uppercase; letter-spacing:.07em;
+  }
+  .days { display:grid; gap:8px; }
+  .day {
+    display:grid; grid-template-columns:1fr auto; gap:8px 12px; align-items:center;
+    padding:12px 14px; border-radius:12px; border:1px solid var(--line);
+    background:rgba(16,24,38,.95); cursor:pointer; text-align:left; width:100%;
+    color:inherit; font:inherit;
+  }
+  .day:hover, .day.active { border-color:rgba(91,159,212,.55); }
+  .day .date { font-weight:750; font-size:15px; }
+  .day .meta { color:var(--dim); font-size:12.5px; margin-top:2px; }
+  .day .pnl { font-weight:750; font-variant-numeric:tabular-nums; font-size:15px; }
+  .up { color:var(--green); } .down { color:var(--red); } .flat { color:var(--dim); }
+  .stats {
+    display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px; margin-bottom:12px;
+  }
+  .stat {
+    border:1px solid var(--line); border-radius:12px; padding:12px; background:rgba(16,24,38,.95);
+  }
+  .stat span { display:block; color:var(--dim); font-size:11.5px; margin-bottom:4px; text-transform:uppercase; letter-spacing:.05em; }
+  .stat b { font-size:18px; font-variant-numeric:tabular-nums; }
+  .trades { display:grid; gap:8px; }
+  .trade {
+    border:1px solid var(--line); border-radius:12px; padding:12px; background:rgba(16,24,38,.95);
+  }
+  .trade-top { display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; margin-bottom:6px; }
+  .ticker { font-weight:750; }
+  .tag { font-size:11px; font-weight:800; letter-spacing:.04em; color:var(--amber); }
+  .rows { display:grid; grid-template-columns:auto 1fr; gap:3px 10px; font-size:12.5px; }
+  .rows span { color:var(--dim); } .rows b { text-align:right; font-weight:600; font-variant-numeric:tabular-nums; }
+  .logs {
+    max-height:420px; overflow:auto; font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size:12px; line-height:1.45; border:1px solid var(--line); border-radius:12px;
+    background:#0a1018; padding:10px 12px;
+  }
+  .log-row { display:grid; grid-template-columns:auto 1fr; gap:8px 12px; padding:3px 0; border-bottom:1px solid rgba(36,48,68,.45); }
+  .log-row:last-child { border-bottom:0; }
+  .log-at { color:var(--dim); white-space:nowrap; }
+  .empty { color:var(--dim); font-size:13.5px; margin:0; }
+  .split { display:grid; gap:14px; }
+  @media (min-width:900px) { .split.both { grid-template-columns:1.1fr .9fr; } }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Muhurat logs</h1>
+    <div class="sub">Daily P&amp;L · investment · where you traded</div>
+  </div>
+  <a class="btn ghost" href="/">← Live</a>
+</header>
+<main>
+  <section class="panel">
+    <h2>Days</h2>
+    <div class="days" id="days"><p class="empty">Loading…</p></div>
+  </section>
+
+  <section class="panel" id="detailPanel" hidden>
+    <h2 id="detailTitle">Day</h2>
+    <div class="stats" id="stats"></div>
+    <div class="split both">
+      <div>
+        <h2>Where invested</h2>
+        <div class="trades" id="trades"><p class="empty">No trades</p></div>
+      </div>
+      <div>
+        <h2>All logs</h2>
+        <div class="logs" id="logs"><p class="empty">No logs</p></div>
+      </div>
+    </div>
+  </section>
+</main>
+<script>
+const fmt = (x, d=2) => x == null || Number.isNaN(Number(x)) ? '—' : Number(x).toLocaleString('en-IN', {minimumFractionDigits:d, maximumFractionDigits:d});
+const money = (x) => x == null || Number.isNaN(Number(x)) ? '—' : '₹' + fmt(x);
+const pnlClass = (x) => !Number.isFinite(Number(x)) || Number(x) === 0 ? 'flat' : Number(x) > 0 ? 'up' : 'down';
+const timeOf = (iso) => {
+  if (!iso) return '—';
+  try {
+    return new Date(iso).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' });
+  } catch (_) { return iso; }
+};
+
+let selected = null;
+
+async function fetchJson(urls) {
+  for (const url of urls) {
+    try {
+      const r = await fetch(url, { cache: 'no-store' });
+      if (!r.ok) continue;
+      return await r.json();
+    } catch (_) { /* try next */ }
+  }
+  return null;
+}
+
+async function loadDays() {
+  const box = document.getElementById('days');
+  try {
+    const j = await fetchJson(['/api/muhurat/days', '/muhurat-data/days.json']);
+    const days = (j && j.days) || [];
+    if (!days.length) {
+      box.innerHTML = '<p class="empty">No history yet — run muhurat2 on Oracle and trades/logs will appear here.</p>';
+      return;
+    }
+    box.innerHTML = days.map((d) => `
+      <button type="button" class="day ${selected === d.date ? 'active' : ''}" data-day="${d.date}">
+        <div>
+          <div class="date">${d.date}</div>
+          <div class="meta">${d.tradeCount || 0} trade(s) · invest ${money(d.investment)}${d.openInvestment ? ` · open ${money(d.openInvestment)}` : ''}</div>
+        </div>
+        <div class="pnl ${pnlClass(d.realizedPnl)}">${money(d.realizedPnl)}</div>
+      </button>
+    `).join('');
+    box.querySelectorAll('.day').forEach((el) => {
+      el.onclick = () => openDay(el.dataset.day);
+    });
+    if (!selected) openDay(days[0].date);
+  } catch (e) {
+    box.innerHTML = `<p class="empty">Failed to load days: ${e.message}</p>`;
+  }
+}
+
+async function openDay(day) {
+  selected = day;
+  document.querySelectorAll('.day').forEach((el) => el.classList.toggle('active', el.dataset.day === day));
+  const panel = document.getElementById('detailPanel');
+  panel.hidden = false;
+  document.getElementById('detailTitle').textContent = day;
+  try {
+    const j = await fetchJson([`/api/muhurat/days/${day}`, `/muhurat-data/day-${day}.json`]);
+    const d = j && j.day;
+    if (!d) throw new Error('No day data yet — is muhurat2 running after git pull?');
+    const eq = (d.byMode && d.byMode.equity) || {};
+    const op = (d.byMode && d.byMode.options) || {};
+    document.getElementById('stats').innerHTML = `
+      <div class="stat"><span>Investment</span><b>${money(d.investment)}</b></div>
+      <div class="stat"><span>Realized P&amp;L</span><b class="${pnlClass(d.realizedPnl)}">${money(d.realizedPnl)}</b></div>
+      <div class="stat"><span>Open</span><b>${money(d.openInvestment)}</b></div>
+      <div class="stat"><span>Options</span><b class="${pnlClass(op.realizedPnl)}">${money(op.realizedPnl)} <span style="font-size:12px;color:var(--dim)">/ ${money(op.investment)}</span></b></div>
+      <div class="stat"><span>Stocks</span><b class="${pnlClass(eq.realizedPnl)}">${money(eq.realizedPnl)} <span style="font-size:12px;color:var(--dim)">/ ${money(eq.investment)}</span></b></div>
+    `;
+    const trades = d.trades || [];
+    document.getElementById('trades').innerHTML = trades.length ? trades.map((t) => `
+      <div class="trade">
+        <div class="trade-top">
+          <div class="ticker">${t.ticker}${t.right ? ` · ${t.right}` : ''}</div>
+          <div class="tag">${(t.mode || '').toUpperCase()} · ${t.status || '—'}</div>
+        </div>
+        <div class="rows">
+          <span>Qty</span><b>${t.qty ?? '—'}</b>
+          <span>Entry</span><b>${fmt(t.entry)}</b>
+          <span>Exit</span><b>${fmt(t.exit)}</b>
+          <span>Invested</span><b>${money(t.spend)}</b>
+          <span>P&amp;L</span><b class="${pnlClass(t.pnl)}">${money(t.pnl)}</b>
+          <span>Reason</span><b>${t.exitReason || '—'}</b>
+          <span>Buy</span><b>${timeOf(t.buyAt)}</b>
+          <span>Sell</span><b>${timeOf(t.sellAt)}</b>
+        </div>
+      </div>
+    `).join('') : '<p class="empty">No trades this day</p>';
+
+    const logs = d.logs || [];
+    document.getElementById('logs').innerHTML = logs.length
+      ? logs.map((l) => `<div class="log-row"><span class="log-at">${timeOf(l.at)} ${(l.mode || '').slice(0, 3)}</span><span>${escapeHtml(l.msg || '')}</span></div>`).join('')
+      : '<p class="empty">No logs this day</p>';
+  } catch (e) {
+    document.getElementById('stats').innerHTML = '';
+    document.getElementById('trades').innerHTML = `<p class="empty">${e.message}</p>`;
+    document.getElementById('logs').innerHTML = '';
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+}
+
+loadDays();
+</script>
+</body>
+</html>
