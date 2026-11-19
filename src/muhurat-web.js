@@ -18,7 +18,12 @@ const {
   exchangeUpstoxCode,
   saveTokenToEnv,
 } = require('./upstox-auth');
-const { listDays, dayDetail, readLogs } = require('./muhurat-history');
+const {
+  listDays,
+  dayDetail,
+  readLogs,
+  backfillFromPaperStates,
+} = require('./muhurat-history');
 
 function lanHost() {
   for (const list of Object.values(os.networkInterfaces())) {
@@ -299,21 +304,17 @@ function mountUpstoxAuthRoutes(app, { onUpstoxLinked, broadcast } = {}) {
   });
 }
 
-function startMuhuratWeb({ getState, onUpstoxLinked } = {}) {
-  const port = webPortOf();
-  const app = express();
-  const publicDir = path.join(__dirname, '..', 'public');
-  const muhuratPage = path.join(publicDir, 'muhurat.html');
-  const logsPage = path.join(publicDir, 'muhurat-logs.html');
-  // Root = Muhurat UI (not public/index.html Supertrend page).
-  app.get('/', (_req, res) => res.sendFile(muhuratPage));
-  app.get('/muhurat.html', (_req, res) => res.redirect(301, '/'));
+/** Mount /muhuratlogs + history APIs on any Express app (Muhurat UI or main dashboard). */
+function mountMuhuratHistoryRoutes(app, { publicDir } = {}) {
+  const dir = publicDir || path.join(__dirname, '..', 'public');
+  const logsPage = path.join(dir, 'muhurat-logs.html');
+  try {
+    backfillFromPaperStates();
+  } catch (_) {
+    /* best-effort seed from existing bot state files */
+  }
   app.get('/muhuratlogs', (_req, res) => res.sendFile(logsPage));
   app.get('/muhurat-logs.html', (_req, res) => res.redirect(301, '/muhuratlogs'));
-  app.use(express.static(publicDir, { index: false }));
-  app.get('/api/muhurat', (_req, res) => {
-    res.json(payloadFromState(typeof getState === 'function' ? getState() : null));
-  });
   app.get('/api/muhurat/days', (req, res) => {
     const limit = Number(req.query.limit) || 60;
     res.json({ ok: true, days: listDays({ limit }) });
@@ -335,6 +336,46 @@ function startMuhuratWeb({ getState, onUpstoxLinked } = {}) {
     const limit = Number(req.query.limit) || 500;
     const mode = req.query.mode || null;
     res.json({ ok: true, day, logs: readLogs(day, { limit, mode }) });
+  });
+}
+
+function candidateWebPorts() {
+  const preferred = webPortOf();
+  const extras = String(process.env.MUHURAT_WEB_FALLBACK_PORTS || '3001,3010,3020')
+    .split(',')
+    .map((s) => Number(String(s).trim()))
+    .filter((n) => Number.isFinite(n) && n > 0);
+  return [...new Set([preferred, ...extras])];
+}
+
+function listenOnPort(server, port) {
+  return new Promise((resolve, reject) => {
+    const onErr = (err) => {
+      server.removeListener('listening', onListen);
+      try { server.close(); } catch (_) { /* ignore */ }
+      reject(err);
+    };
+    const onListen = () => {
+      server.removeListener('error', onErr);
+      resolve(port);
+    };
+    server.once('error', onErr);
+    server.once('listening', onListen);
+    server.listen(port, '0.0.0.0');
+  });
+}
+
+async function startMuhuratWeb({ getState, onUpstoxLinked } = {}) {
+  const app = express();
+  const publicDir = path.join(__dirname, '..', 'public');
+  const muhuratPage = path.join(publicDir, 'muhurat.html');
+  // Root = Muhurat UI (not public/index.html Supertrend page).
+  app.get('/', (_req, res) => res.sendFile(muhuratPage));
+  app.get('/muhurat.html', (_req, res) => res.redirect(301, '/'));
+  mountMuhuratHistoryRoutes(app, { publicDir });
+  app.use(express.static(publicDir, { index: false }));
+  app.get('/api/muhurat', (_req, res) => {
+    res.json(payloadFromState(typeof getState === 'function' ? getState() : null));
   });
   app.get('/api/health', (_req, res) => res.json({ ok: true, app: 'muhurat' }));
 
@@ -366,49 +407,53 @@ function startMuhuratWeb({ getState, onUpstoxLinked } = {}) {
   // Prevent crash: ws re-emits HTTP server listen errors as unhandled 'error' on WSS.
   wss.on('error', () => {});
 
-  let listening = false;
-  const ready = new Promise((resolve, reject) => {
-    const fail = (err) => {
-      if (listening) return;
-      listening = true; // block double reject
-      const msg = err && err.code === 'EADDRINUSE'
-        ? `Port ${port} already in use — stop the other process (lsof -iTCP:${port} -sTCP:LISTEN) or set MUHURAT_WEB_PORT`
-        : (err && err.message) || String(err);
-      reject(new Error(msg));
-      try { server.close(); } catch (_) { /* ignore */ }
-    };
-    server.on('error', fail);
-    server.listen(port, '0.0.0.0', () => {
-      listening = true;
-      server.removeListener('error', fail);
-      server.on('error', (err) => {
-        console.error(`Muhurat web server: ${err.message}`);
-      });
-      const publicHost = publicHostOf();
-      const lan = lanHost();
-      const publicUrl = pageUrl(publicHost, port);
-      const lanUrl = pageUrl(lan, port);
-      const localUrl = pageUrl('127.0.0.1', port);
-      resolve({
-        port,
-        // Prefer Oracle/public IP so remote users can open the UI.
-        url: publicUrl || lanUrl || localUrl,
-        publicUrl,
-        lanUrl,
-        localUrl,
-        phone: lanUrl,
-        host: publicHost || lan || '127.0.0.1',
-        broadcast,
-        close: () => new Promise((r) => server.close(() => r())),
-      });
-    });
+  const ports = candidateWebPorts();
+  let port = null;
+  let lastErr = null;
+  for (const candidate of ports) {
+    try {
+      port = await listenOnPort(server, candidate);
+      break;
+    } catch (err) {
+      lastErr = err;
+      if (!(err && err.code === 'EADDRINUSE')) {
+        throw err;
+      }
+    }
+  }
+  if (port == null) {
+    const tried = ports.join(', ');
+    throw new Error(
+      lastErr && lastErr.code === 'EADDRINUSE'
+        ? `Ports in use (${tried}) — stop the other process or set MUHURAT_WEB_PORT`
+        : (lastErr && lastErr.message) || 'Muhurat web failed to bind'
+    );
+  }
+  server.on('error', (err) => {
+    console.error(`Muhurat web server: ${err.message}`);
   });
-
-  return ready;
+  const publicHost = publicHostOf();
+  const lan = lanHost();
+  const publicUrl = pageUrl(publicHost, port);
+  const lanUrl = pageUrl(lan, port);
+  const localUrl = pageUrl('127.0.0.1', port);
+  return {
+    port,
+    // Prefer Oracle/public IP so remote users can open the UI.
+    url: publicUrl || lanUrl || localUrl,
+    publicUrl,
+    lanUrl,
+    localUrl,
+    phone: lanUrl,
+    host: publicHost || lan || '127.0.0.1',
+    broadcast,
+    close: () => new Promise((r) => server.close(() => r())),
+  };
 }
 
 module.exports = {
   startMuhuratWeb,
+  mountMuhuratHistoryRoutes,
   payloadFromState,
   slimBook,
   webPortOf,

@@ -324,6 +324,57 @@ function dayDetail(day) {
   };
 }
 
+const PAPER_DIR = path.join(__dirname, '..', 'paper');
+
+/** Seed day ledgers from existing muhurat bot state JSON files. */
+function backfillFromPaperStates() {
+  let names = [];
+  try {
+    names = fs.readdirSync(PAPER_DIR);
+  } catch (_) {
+    return { days: 0 };
+  }
+  const re = /^(muhurat(?:-paper)?)-(live|options)-(\d{4}-\d{2}-\d{2})\.json$/;
+  let days = 0;
+  for (const name of names) {
+    const m = name.match(re);
+    if (!m) continue;
+    try {
+      const raw = JSON.parse(fs.readFileSync(path.join(PAPER_DIR, name), 'utf8'));
+      if (!raw || typeof raw !== 'object') continue;
+      const mode = m[2] === 'options' ? 'options' : 'equity';
+      const day = m[3];
+      const state = {
+        date: raw.date || day,
+        bookMode: mode,
+        mode: m[2],
+        positions: raw.positions && typeof raw.positions === 'object' ? raw.positions : {},
+      };
+      if (!state.date) continue;
+      syncFromBotState(state);
+      // Also copy short in-memory logs into persistent log file if empty.
+      if (Array.isArray(raw.log) && raw.log.length) {
+        const existing = readLogs(state.date, { limit: 5 });
+        if (!existing.length) {
+          for (const row of raw.log) {
+            if (!row || !row.msg) continue;
+            appendLog({
+              day: state.date,
+              mode,
+              msg: row.msg,
+              at: row.at || new Date().toISOString(),
+            });
+          }
+        }
+      }
+      days += 1;
+    } catch (_) {
+      /* skip bad file */
+    }
+  }
+  return { days };
+}
+
 module.exports = {
   ROOT,
   appendLog,
@@ -334,5 +385,6 @@ module.exports = {
   recordBuy,
   recordSell,
   syncFromBotState,
+  backfillFromPaperStates,
   emptyDay,
 };

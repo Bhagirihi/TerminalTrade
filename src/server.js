@@ -9,6 +9,7 @@ const { config } = require('./config');
 const { Engine } = require('./engine');
 const { openTerminal } = require('./terminal');
 const { openTrade } = require('./trade-view');
+const { mountMuhuratHistoryRoutes } = require('./muhurat-web');
 
 const terminalMode = process.argv.includes('--terminal');
 const tradeMode = process.argv.includes('--trade');
@@ -105,7 +106,10 @@ function runClient() {
 
 function startServer() {
   const app = express();
-  app.use(express.static(path.join(__dirname, '..', 'public')));
+  const publicDir = path.join(__dirname, '..', 'public');
+  // History/logs work on the main :3000 dashboard even when Muhurat web can't bind.
+  mountMuhuratHistoryRoutes(app, { publicDir });
+  app.use(express.static(publicDir));
 
   let latestState = { status: 'starting', symbols: {} };
   const clients = new Set();
