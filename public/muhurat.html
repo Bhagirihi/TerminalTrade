@@ -350,21 +350,51 @@ function render(state) {
   }
 }
 
-function connect() {
+async function loadStateOnce() {
+  // Live API (dedicated Muhurat port) or static snapshot on Supertrend :3000/muhurat/
+  try {
+    const r = await fetch('/api/muhurat', { cache: 'no-store' });
+    if (r.ok) {
+      const j = await r.json();
+      if (j && (j.book || j.mode || j.kind === 'muhurat')) {
+        render(j);
+        return true;
+      }
+    }
+  } catch (_) { /* fall through */ }
+  try {
+    const r = await fetch('/muhurat-live.json', { cache: 'no-store' });
+    if (!r.ok) return false;
+    const j = await r.json();
+    if (j && j.state) {
+      render(j.state);
+      return true;
+    }
+  } catch (_) { /* ignore */ }
+  return false;
+}
+
+function connectWs() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws = new WebSocket(proto + '://' + location.host);
+  let ws;
+  try {
+    ws = new WebSocket(proto + '://' + location.host);
+  } catch (_) {
+    return;
+  }
   ws.onmessage = (ev) => {
     try {
       const msg = JSON.parse(ev.data);
       if (msg.type === 'muhurat') render(msg.state);
     } catch (_) {}
   };
-  ws.onclose = () => setTimeout(connect, 1200);
-  ws.onerror = () => {};
+  ws.onclose = () => setTimeout(connectWs, 2000);
+  ws.onerror = () => { try { ws.close(); } catch (_) {} };
 }
 
-fetch('/api/muhurat').then((r) => r.json()).then(render).catch(() => {});
-connect();
+loadStateOnce();
+connectWs();
+setInterval(loadStateOnce, 2500);
 </script>
 </body>
 </html>

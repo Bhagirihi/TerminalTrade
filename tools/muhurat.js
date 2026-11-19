@@ -15,7 +15,7 @@ const { openTerminal } = require('../src/terminal');
 const { UpstoxFeed } = require('../src/data/upstox-feed');
 const { summarizePortfolio, summarizeLive } = require('../src/portfolio');
 const { demoChecks, buildDemoState } = require('../src/muhurat-demo');
-const { startMuhuratWeb } = require('../src/muhurat-web');
+const { startMuhuratWeb, publishLiveSnapshot } = require('../src/muhurat-web');
 const {
   isUpstoxAuthError,
   muhuratWebRootUrl,
@@ -956,6 +956,7 @@ async function live(opts = {}) {
   function pushUi() {
     if (term) term.draw();
     if (web) web.broadcast();
+    else publishLiveSnapshot(state); // still feed :3000/muhurat/ when dedicated web port is busy
   }
 
   let tickTimer = null;

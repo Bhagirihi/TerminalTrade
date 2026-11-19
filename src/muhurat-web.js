@@ -1,9 +1,10 @@
 'use strict';
 
 // Lightweight web UI for muhurat2 — same state as the terminal, on a browser/phone.
-// Listens on 0.0.0.0 so Oracle/public IP can reach it (open port in cloud firewall).
-// Default port 3000 (MUHURAT_WEB_PORT, else PORT, else 3000).
+// Dedicated UI port defaults to 3001 (Supertrend often owns :3000).
+// Also publishes public/muhurat-live.json so :3000/muhurat/ can show the same board.
 
+const fs = require('fs');
 const http = require('http');
 const os = require('os');
 const path = require('path');
@@ -48,9 +49,10 @@ function phoneUrl(port) {
 }
 
 function webPortOf() {
-  const n = Number(process.env.MUHURAT_WEB_PORT || process.env.PORT || 3000);
+  // Prefer 3001 so Muhurat UI does not collide with Supertrend on :3000.
+  const n = Number(process.env.MUHURAT_WEB_PORT || 3001);
   if (Number.isFinite(n) && n > 0) return Math.floor(n);
-  return 3000;
+  return 3001;
 }
 
 /** Prefer Oracle/public host so users open the cloud IP, not localhost. */
@@ -311,9 +313,11 @@ function mountMuhuratHistoryRoutes(app, { publicDir } = {}) {
   } catch (_) {
     /* best-effort seed from existing bot state files */
   }
-  // Prefer /muhuratlogs/ (static folder) so Supertrend on :3000 can serve it too.
+  // Prefer /muhuratlogs/ + /muhurat/ static folders so Supertrend on :3000 can serve them.
   app.get('/muhuratlogs', (_req, res) => res.redirect(302, '/muhuratlogs/'));
   app.get('/muhurat-logs.html', (_req, res) => res.redirect(302, '/muhuratlogs/'));
+  app.get('/muhurat', (_req, res) => res.redirect(302, '/muhurat/'));
+  app.get('/muhurat.html', (_req, res) => res.redirect(302, '/muhurat/'));
   app.get('/api/muhurat/days', (req, res) => {
     const limit = Number(req.query.limit) || 60;
     res.json({ ok: true, days: listDays({ limit }) });
@@ -340,11 +344,28 @@ function mountMuhuratHistoryRoutes(app, { publicDir } = {}) {
 
 function candidateWebPorts() {
   const preferred = webPortOf();
-  const extras = String(process.env.MUHURAT_WEB_FALLBACK_PORTS || '3001,3010,3020')
+  const extras = String(process.env.MUHURAT_WEB_FALLBACK_PORTS || '3000,3010,3020')
     .split(',')
     .map((s) => Number(String(s).trim()))
     .filter((n) => Number.isFinite(n) && n > 0);
   return [...new Set([preferred, ...extras])];
+}
+
+const LIVE_JSON = path.join(__dirname, '..', 'public', 'muhurat-live.json');
+
+/** Same payload as the Muhurat websocket — for Supertrend static /muhurat/ polling. */
+function publishLiveSnapshot(stateOrFn) {
+  try {
+    const raw = typeof stateOrFn === 'function' ? stateOrFn() : stateOrFn;
+    const payload = payloadFromState(raw);
+    fs.mkdirSync(path.dirname(LIVE_JSON), { recursive: true });
+    fs.writeFileSync(
+      LIVE_JSON,
+      JSON.stringify({ ok: true, at: new Date().toISOString(), state: payload })
+    );
+  } catch (_) {
+    /* best-effort */
+  }
 }
 
 function listenOnPort(server, port) {
@@ -390,7 +411,9 @@ async function startMuhuratWeb({ getState, onUpstoxLinked } = {}) {
   const clients = new Set();
 
   const broadcast = () => {
-    const payload = JSON.stringify({ type: 'muhurat', state: payloadFromState(typeof getState === 'function' ? getState() : null) });
+    const state = typeof getState === 'function' ? getState() : null;
+    publishLiveSnapshot(state);
+    const payload = JSON.stringify({ type: 'muhurat', state: payloadFromState(state) });
     for (const ws of clients) {
       if (ws.readyState === 1) ws.send(payload);
     }
@@ -453,6 +476,7 @@ async function startMuhuratWeb({ getState, onUpstoxLinked } = {}) {
 module.exports = {
   startMuhuratWeb,
   mountMuhuratHistoryRoutes,
+  publishLiveSnapshot,
   payloadFromState,
   slimBook,
   webPortOf,

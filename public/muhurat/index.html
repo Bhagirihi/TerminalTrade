@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0c121c" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<title>Muhurat2 · Live</title>
+<style>
+  :root {
+    --bg:#0c121c;
+    --bg2:#101826;
+    --panel:#141c2b;
+    --line:#243044;
+    --txt:#e8edf5;
+    --dim:#8b97ab;
+    --green:#22c55e;
+    --red:#ef4444;
+    --amber:#f59e0b;
+    --blue:#5b9fd4;
+    --ink:#071018;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0;
+    min-height:100vh;
+    color:var(--txt);
+    font-family:"IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+    background:
+      radial-gradient(1200px 500px at 10% -10%, rgba(91,159,212,.16), transparent 55%),
+      radial-gradient(900px 420px at 90% 0%, rgba(34,197,94,.08), transparent 50%),
+      linear-gradient(180deg, #0a1018 0%, var(--bg) 40%, #0b1420 100%);
+  }
+  header {
+    display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between;
+    padding:14px max(16px, env(safe-area-inset-right)) 12px max(16px, env(safe-area-inset-left));
+    border-bottom:1px solid rgba(36,48,68,.9);
+    position:sticky; top:0; z-index:5;
+    background:rgba(12,18,28,.88); backdrop-filter:blur(10px);
+  }
+  .brand { display:flex; flex-direction:column; gap:2px; min-width:0; }
+  h1 { margin:0; font-size:20px; font-weight:700; letter-spacing:-.03em; }
+  .sub { color:var(--dim); font-size:12.5px; }
+  .header-right { display:flex; flex-wrap:wrap; gap:8px; align-items:center; justify-content:flex-end; }
+  .badges { display:flex; flex-wrap:wrap; gap:6px; }
+  .badge {
+    font-size:11.5px; padding:5px 10px; border-radius:999px;
+    border:1px solid var(--line); background:rgba(20,28,43,.9); color:var(--dim);
+  }
+  .badge.live { color:var(--green); border-color:rgba(34,197,94,.4); }
+  .badge.warn { color:var(--amber); border-color:rgba(245,158,11,.4); }
+  .badge.err { color:var(--red); border-color:rgba(239,68,68,.4); }
+  .badge.ok { color:var(--green); border-color:rgba(34,197,94,.4); }
+  .btn {
+    appearance:none; border:1px solid rgba(91,159,212,.45);
+    background:linear-gradient(180deg, #1a2a3d, #132033);
+    color:var(--txt); font:inherit; font-size:13px; font-weight:650;
+    padding:8px 14px; border-radius:10px; cursor:pointer; text-decoration:none;
+    display:inline-flex; align-items:center; gap:8px;
+  }
+  .btn:hover { border-color:rgba(91,159,212,.8); }
+  .btn.primary {
+    background:linear-gradient(180deg, #2f6f9e, #1f4f76);
+    border-color:rgba(120,180,220,.55);
+  }
+  .btn.ghost { background:transparent; border-color:var(--line); color:var(--dim); }
+  main {
+    padding:16px max(16px, env(safe-area-inset-right)) calc(28px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+    display:grid; gap:14px; max-width:1180px; margin:0 auto;
+  }
+  .banner {
+    display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between;
+    padding:14px 16px; border-radius:14px;
+    border:1px solid rgba(91,159,212,.35);
+    background:linear-gradient(120deg, rgba(20,40,60,.9), rgba(16,28,42,.85));
+  }
+  .banner.need {
+    border-color:rgba(245,158,11,.45);
+    background:linear-gradient(120deg, rgba(50,36,12,.55), rgba(16,28,42,.85));
+  }
+  .banner.ok {
+    border-color:rgba(34,197,94,.35);
+    background:linear-gradient(120deg, rgba(12,40,24,.45), rgba(16,28,42,.85));
+  }
+  .banner h2 { margin:0 0 4px; font-size:15px; font-weight:700; }
+  .banner p { margin:0; color:var(--dim); font-size:13px; line-height:1.4; max-width:52ch; }
+  .panel {
+    background:rgba(20,28,43,.92); border:1px solid var(--line); border-radius:14px; padding:14px 16px;
+  }
+  .panel h2 {
+    margin:0 0 10px; font-size:12px; font-weight:700; color:var(--dim);
+    text-transform:uppercase; letter-spacing:.07em;
+  }
+  .phase { font-size:15px; font-weight:650; margin:0 0 8px; }
+  .phase.ok { color:var(--green); } .phase.wait { color:var(--amber); }
+  .meta { color:var(--dim); font-size:13px; display:flex; flex-wrap:wrap; gap:6px 14px; }
+  .signals { display:grid; gap:8px; }
+  .sig {
+    font-size:20px; font-weight:800; letter-spacing:.01em; padding:12px 14px; border-radius:12px;
+    border:1px solid var(--line); font-variant-numeric:tabular-nums;
+  }
+  .sig.buy { color:var(--ink); background:linear-gradient(90deg,#22c55e,#4ade80); border-color:#16a34a; }
+  .sig.sell { color:#2a0707; background:linear-gradient(90deg,#ef4444,#f87171); border-color:#dc2626; }
+  .empty { color:var(--dim); font-size:13.5px; margin:0; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr)); gap:10px; }
+  .card {
+    border:1px solid var(--line); border-radius:12px; padding:12px; background:rgba(16,24,38,.95); min-width:0;
+  }
+  .card.buy { border-color:rgba(34,197,94,.5); }
+  .card.watch { border-color:rgba(245,158,11,.4); }
+  .card-top { display:flex; justify-content:space-between; gap:8px; align-items:baseline; margin-bottom:6px; }
+  .ticker { font-weight:750; font-size:15px; }
+  .p { color:var(--dim); font-size:12.5px; font-variant-numeric:tabular-nums; }
+  .tag { font-size:11px; font-weight:800; letter-spacing:.04em; }
+  .tag.buy { color:var(--green); } .tag.watch { color:var(--amber); }
+  .rows { display:grid; grid-template-columns:auto 1fr; gap:3px 10px; font-size:12.5px; }
+  .rows span { color:var(--dim); } .rows b { text-align:right; font-weight:600; font-variant-numeric:tabular-nums; }
+  .up { color:var(--green); } .down { color:var(--red); }
+  .pos {
+    margin-top:8px; padding:8px 10px; border-radius:8px;
+    border:1px solid rgba(34,197,94,.35); background:#0f1f17; font-size:13px;
+  }
+  .err { color:var(--red); font-size:13px; margin:8px 0 0; word-break:break-word; }
+  .split { display:grid; gap:14px; }
+  @media (min-width:900px) { .split.both { grid-template-columns:1fr 1fr; } }
+  footer {
+    color:var(--dim); font-size:12px; text-align:center;
+    padding:0 16px calc(16px + env(safe-area-inset-bottom));
+  }
+  a { color:var(--blue); text-decoration:none; }
+  code { font-size:11.5px; color:#c7d4e6; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <h1>Muhurat2</h1>
+    <div class="sub">Stocks + options · live levels</div>
+  </div>
+  <div class="header-right">
+    <div class="badges">
+      <span class="badge" id="modeBadge">—</span>
+      <span class="badge" id="feedBadge">connecting…</span>
+      <span class="badge" id="upstoxBadge">Upstox —</span>
+      <span class="badge" id="clockBadge">—</span>
+    </div>
+    <a class="btn ghost" href="/muhuratlogs/">Logs & P&amp;L</a>
+    <a class="btn primary" id="linkUpstoxBtn" href="/auth/upstox">Link Upstox</a>
+  </div>
+</header>
+<main>
+  <section class="banner need" id="upstoxBanner" hidden>
+    <div>
+      <h2 id="upstoxBannerTitle">Link Upstox</h2>
+      <p id="upstoxBannerText">Connect your Upstox account so live LTP, portfolio, and orders can run.</p>
+    </div>
+    <a class="btn primary" id="upstoxBannerBtn" href="/auth/upstox">Link Upstox</a>
+  </section>
+
+  <section class="panel" id="signalsPanel">
+    <h2>User signals</h2>
+    <div class="signals" id="signals"><p class="empty">Waiting for live picks…</p></div>
+  </section>
+
+  <section class="panel" id="statusPanel">
+    <h2>Session</h2>
+    <p class="phase wait" id="phaseLine">Connecting…</p>
+    <div class="meta" id="metaLine"></div>
+    <p class="err" id="errorLine" hidden></p>
+  </section>
+
+  <div class="split" id="books"></div>
+</main>
+<footer>
+  BUY after 9:25 · confirm ~3 min · hard exit 3:15 IST ·
+  <a href="/muhuratlogs/">Logs & P&amp;L</a> ·
+  <a href="/auth/upstox">Re-link Upstox</a>
+</footer>
+<script>
+const fmt = (x, d=2) => x == null || Number.isNaN(Number(x)) ? '—' : Number(x).toLocaleString('en-IN', {minimumFractionDigits:d, maximumFractionDigits:d});
+const money = (x) => x == null || Number.isNaN(Number(x)) ? '—' : '₹' + fmt(x);
+
+function renderUpstox(upstox, linkedFlash) {
+  const badge = document.getElementById('upstoxBadge');
+  const banner = document.getElementById('upstoxBanner');
+  const title = document.getElementById('upstoxBannerTitle');
+  const text = document.getElementById('upstoxBannerText');
+  const btn = document.getElementById('linkUpstoxBtn');
+  const bannerBtn = document.getElementById('upstoxBannerBtn');
+  const linked = !!(upstox && upstox.linked);
+  const hasKeys = !!(upstox && upstox.hasAppKeys);
+
+  if (linked) {
+    badge.textContent = linkedFlash ? 'Upstox linked' : 'Upstox linked';
+    badge.className = 'badge ok';
+    btn.textContent = 'Re-link Upstox';
+    btn.className = 'btn ghost';
+    banner.hidden = !linkedFlash;
+    if (linkedFlash) {
+      banner.className = 'banner ok';
+      title.textContent = 'Upstox connected';
+      text.textContent = 'Access token saved. Live data can use this session.';
+      bannerBtn.textContent = 'Dismiss';
+      bannerBtn.href = '#';
+      bannerBtn.onclick = (e) => { e.preventDefault(); banner.hidden = true; history.replaceState({}, '', '/'); };
+    }
+    return;
+  }
+
+  badge.textContent = 'Upstox not linked';
+  badge.className = 'badge warn';
+  btn.textContent = 'Link Upstox';
+  btn.className = 'btn primary';
+  banner.hidden = false;
+  banner.className = 'banner need';
+  bannerBtn.onclick = null;
+  bannerBtn.href = '/auth/upstox';
+  bannerBtn.textContent = hasKeys ? 'Link Upstox' : 'Fix .env keys';
+  title.textContent = hasKeys ? 'Link Upstox to continue' : 'Upstox app keys missing';
+  text.textContent = hasKeys
+    ? `Opens Upstox login, then returns here. Redirect must match your app: ${upstox && upstox.redirectUri ? upstox.redirectUri : '…/auth/upstox/callback'}`
+    : 'Set UPSTOX_API_KEY and UPSTOX_API_SECRET in .env on the server, then link.';
+}
+
+function renderSignals(sig) {
+  const el = document.getElementById('signals');
+  const buys = (sig && sig.buys) || [];
+  const sells = (sig && sig.sells) || [];
+  if (!buys.length && !sells.length) {
+    el.innerHTML = '<p class="empty">No BUY(USER) / SELL(USER) yet — watchlist only or still confirming.</p>';
+    return;
+  }
+  el.innerHTML = [
+    ...buys.map((t) => `<div class="sig buy">BUY(USER) ==> ${t}</div>`),
+    ...sells.map((t) => `<div class="sig sell">SELL(USER) ==> ${t}</div>`),
+  ].join('');
+}
+
+function cardHtml(r) {
+  if (!r) return '';
+  const v = r.verdict === 'BUY' ? 'buy' : 'watch';
+  const tag = r.verdict === 'BUY' ? 'BUY' : (r.action || r.verdict || 'WATCH');
+  const lv = r.levels || {};
+  return `<article class="card ${v}">
+    <div class="card-top">
+      <div><span class="ticker">${r.ticker || '—'}</span> <span class="tag ${v}">${tag}</span></div>
+      <div class="p">P${fmt(r.profitScore)}</div>
+    </div>
+    <div class="rows">
+      <span>LTP</span><b>${fmt(r.ltp)}</b>
+      <span>SL</span><b class="down">${fmt(r.sellStop || lv.stopLoss)}</b>
+      <span>T1</span><b class="up">${fmt(r.sellT1 || lv.target1)}</b>
+      <span>T2</span><b class="up">${fmt(r.sellT2 || lv.target2)}</b>
+      ${r.qty > 0 ? `<span>Qty</span><b>${r.qty}${r.spend ? ' · ' + money(r.spend) : ''}</b>` : ''}
+      ${r.confirmLeftSec != null ? `<span>Confirm</span><b>${r.confirmLeftSec}s</b>` : ''}
+    </div>
+  </article>`;
+}
+
+function sectionCards(title, rows) {
+  const list = (rows || []).filter(Boolean);
+  if (!list.length) return '';
+  return `<section class="panel"><h2>${title}</h2><div class="grid">${list.map(cardHtml).join('')}</div></section>`;
+}
+
+function botHtml(bot, label) {
+  if (!bot) return '';
+  const bits = [];
+  if (bot.live || bot.paper) {
+    const label = bot.paper ? 'PAPER AUTO' : 'FULL AUTO';
+    bits.push(`<div class="meta">${label} · product ${bot.product || 'I'} · spend ${money(bot.spend)} · open ${bot.openCount || 0}${bot.tradesToday != null ? ' · trades ' + bot.tradesToday + '/' + (bot.maxTrades || '∞') : ''}</div>`);
+  }
+  for (const p of bot.positions || []) {
+    bits.push(`<div class="pos"><b>${p.ticker}</b> qty ${p.qty} · entry ${fmt(p.entry)} · SL ${fmt(p.stop)} · last ${fmt(p.last)} · ${p.stage || ''}</div>`);
+  }
+  if (bot.lastError) bits.push(`<p class="err">${bot.lastError}</p>`);
+  if (!bits.length) return '';
+  return `<section class="panel"><h2>${label || 'Bot'}</h2>${bits.join('')}</section>`;
+}
+
+function bookBlock(book, bot, title) {
+  if (!book) return '';
+  const phase = book.phase || {};
+  const live = phase.canDecideBuy
+    ? (book.liveBuys || []).filter((r) => r && r.verdict === 'BUY' && Number(r.profitScore) > 12)
+    : [];
+  const watch = phase.canDecideBuy
+    ? (book.extrasWatch || []).filter((r) => r && Number(r.profitScore) > 12)
+    : (book.core && book.core.length ? book.core : book.prep || []).filter((r) => r && Number(r.profitScore) > 12);
+  const confirming = (book.budget && book.budget.confirming) || [];
+  const bud = book.budget;
+  const meta = [
+    book.mode === 'options' ? 'Options' : 'Stocks',
+    phase.clock ? 'now ' + phase.clock : '',
+    bud ? 'budget ' + money(bud.budget) : '',
+    book.availableMargin != null ? 'margin ' + money(book.availableMargin) : '',
+  ].filter(Boolean).join(' · ');
+  return `
+    <div>
+      <section class="panel">
+        <h2>${title}</h2>
+        <p class="phase ${phase.canDecideBuy ? 'ok' : 'wait'}">${phase.message || '—'}</p>
+        <div class="meta">${meta}</div>
+        ${book.lossGate && book.lossGate.blocked ? `<p class="err">DO NOT TRADE · book loss ${book.lossGate.pnlPct}%</p>` : ''}
+      </section>
+      ${botHtml(bot, title + ' bot')}
+      ${sectionCards(phase.canDecideBuy ? 'Live BUY — P > 12' : 'Watchlist — P > 12 (no BUY call yet)', phase.canDecideBuy ? live : watch)}
+      ${phase.canDecideBuy ? sectionCards('Watchlist — P > 12', watch) : ''}
+      ${sectionCards('Confirming', confirming)}
+      ${sectionCards('Top Gainers — P > 12', book.topGainers)}
+    </div>`;
+}
+
+let linkedFlash = /(?:\?|&)linked=1(?:&|$)/.test(location.search);
+
+function render(state) {
+  if (!state) return;
+  const mode = state.mode || 'equity';
+  document.getElementById('modeBadge').textContent = mode === 'both' ? 'stocks + options' : mode;
+  const feed = state.feed === 'live' ? 'FEED LIVE' : state.feed === 'poll' ? 'FEED POLL' : 'FEED —';
+  const fb = document.getElementById('feedBadge');
+  fb.textContent = feed;
+  fb.className = 'badge' + (state.feed === 'live' ? ' live' : state.feed === 'poll' ? ' warn' : '');
+  document.getElementById('clockBadge').textContent = state.updatedAt || '—';
+
+  renderUpstox(state.upstox, linkedFlash);
+
+  const phase = (state.book && state.book.phase) || {};
+  const pl = document.getElementById('phaseLine');
+  pl.textContent = phase.message || 'Waiting…';
+  pl.className = 'phase ' + (phase.canDecideBuy ? 'ok' : 'wait');
+  document.getElementById('metaLine').textContent = [
+    phase.clock ? 'now ' + phase.clock : '',
+    state.feed ? feed : '',
+  ].filter(Boolean).join(' · ');
+
+  const err = document.getElementById('errorLine');
+  if (state.error) { err.hidden = false; err.textContent = state.error; }
+  else { err.hidden = true; err.textContent = ''; }
+
+  renderSignals(state.userSignals);
+  const books = document.getElementById('books');
+  books.className = 'split' + (mode === 'both' ? ' both' : '');
+  if (mode === 'both') {
+    books.innerHTML = bookBlock(state.book, state.bot, 'Stocks') + bookBlock(state.optionsBook, state.optionsBot, 'Options');
+  } else if (mode === 'options') {
+    books.innerHTML = bookBlock(state.book, state.bot, 'Options');
+  } else {
+    books.innerHTML = bookBlock(state.book, state.bot, 'Stocks');
+  }
+}
+
+async function loadStateOnce() {
+  // Live API (dedicated Muhurat port) or static snapshot on Supertrend :3000/muhurat/
+  try {
+    const r = await fetch('/api/muhurat', { cache: 'no-store' });
+    if (r.ok) {
+      const j = await r.json();
+      if (j && (j.book || j.mode || j.kind === 'muhurat')) {
+        render(j);
+        return true;
+      }
+    }
+  } catch (_) { /* fall through */ }
+  try {
+    const r = await fetch('/muhurat-live.json', { cache: 'no-store' });
+    if (!r.ok) return false;
+    const j = await r.json();
+    if (j && j.state) {
+      render(j.state);
+      return true;
+    }
+  } catch (_) { /* ignore */ }
+  return false;
+}
+
+function connectWs() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  let ws;
+  try {
+    ws = new WebSocket(proto + '://' + location.host);
+  } catch (_) {
+    return;
+  }
+  ws.onmessage = (ev) => {
+    try {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === 'muhurat') render(msg.state);
+    } catch (_) {}
+  };
+  ws.onclose = () => setTimeout(connectWs, 2000);
+  ws.onerror = () => { try { ws.close(); } catch (_) {} };
+}
+
+loadStateOnce();
+connectWs();
+setInterval(loadStateOnce, 2500);
+</script>
+</body>
+</html>
