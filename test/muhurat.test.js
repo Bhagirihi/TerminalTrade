@@ -16,6 +16,7 @@ const {
   applySessionVerdict,
   applyLiveLtp,
   withTradeSignals,
+  longStopHit,
   getSession,
   maxTradesPerDay,
   DEFAULT_MAX_TRADES_STOCK,
@@ -291,6 +292,21 @@ test('applyLiveLtp marks LIVE and refreshes ENTRY BUY SELL', () => {
   assert.ok(row.entry);
   assert.ok(row.sellStop);
   assert.ok(row.sellT1);
+});
+
+test('withTradeSignals shows EXIT when LTP crosses under SL', () => {
+  const phase = sessionPhase(istToEpoch('2026-11-10', 10, 0), 'regular');
+  const row = withTradeSignals({
+    ticker: 'BANKNIFTY 63400 CE',
+    mode: 'options',
+    verdict: 'BUY',
+    ltp: 330.05,
+    levels: { entry: 390, stopLoss: 369.35, activeStop: 369.35, target1: 450, target2: 500 },
+  }, phase);
+  assert.equal(row.action, 'EXIT');
+  assert.equal(row.stopHit, true);
+  assert.equal(row.buy, 'NO');
+  assert.equal(longStopHit(row), true);
 });
 
 test('applyLiveLtp options: SL never drops when premium falls', () => {

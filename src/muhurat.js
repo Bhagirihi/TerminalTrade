@@ -760,12 +760,32 @@ function applySessionVerdict(row, phaseInfo, openPx) {
   return withTradeSignals(out, phaseInfo);
 }
 
+/** Long card: LTP at/under SL → stop is hit (show EXIT, do not buy). */
+function longStopHit(row) {
+  if (!row) return false;
+  const ltp = Number(row.ltp);
+  const lv = row.levels || {};
+  const sl = Number(
+    row.sellStop != null ? row.sellStop
+      : (lv.activeStop != null ? lv.activeStop : lv.stopLoss)
+  );
+  return Number.isFinite(ltp) && Number.isFinite(sl) && ltp <= sl + 1e-9;
+}
+
 // Clear ENTRY / BUY / SELL levels for the card (signals only).
 function withTradeSignals(row, phaseInfo) {
   const lv = row.levels || {};
   const entry = r2(lv.entry != null ? lv.entry : row.ltp);
+  // Never lower SL to sit under a falling LTP — if stop >= LTP, keep stop and mark EXIT.
+  const sellStop = lv.activeStop != null ? lv.activeStop : lv.stopLoss;
+  row.sellStop = sellStop;
+  row.sellT1 = lv.target1;
+  row.sellT2 = lv.target2;
+
   let action = 'WAIT';
-  if (phaseInfo && phaseInfo.phase === 'before_open') action = 'WAIT OPEN';
+  if (longStopHit(row)) {
+    action = 'EXIT';
+  } else if (phaseInfo && phaseInfo.phase === 'before_open') action = 'WAIT OPEN';
   else if (phaseInfo && phaseInfo.phase === 'watching_open') action = 'WATCH OPEN';
   else if (row.verdict === 'BUY') action = 'BUY';
   else if (row.verdict === 'PREP') action = 'PREP';
@@ -775,12 +795,10 @@ function withTradeSignals(row, phaseInfo) {
   else action = 'WATCH';
 
   row.entry = entry;
-  row.buy = row.verdict === 'BUY' ? 'YES' : (row.verdict === 'PREP' ? 'LATER' : 'NO');
-  // Never lower SL to sit under a falling LTP — if stop >= LTP, keep stop (do not buy / exit).
-  const sellStop = lv.activeStop != null ? lv.activeStop : lv.stopLoss;
-  row.sellStop = sellStop;
-  row.sellT1 = lv.target1;
-  row.sellT2 = lv.target2;
+  row.stopHit = action === 'EXIT';
+  row.buy = action === 'EXIT'
+    ? 'NO'
+    : (row.verdict === 'BUY' ? 'YES' : (row.verdict === 'PREP' ? 'LATER' : 'NO'));
   row.action = action;
   row.trade = {
     entry,
@@ -1344,6 +1362,7 @@ module.exports = {
   sessionPhase,
   applySessionVerdict,
   withTradeSignals,
+  longStopHit,
   applyLiveLtp,
   patchBookLtps,
   inheritLevelLocks,

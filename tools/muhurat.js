@@ -248,6 +248,7 @@ function tonePct(n) {
 }
 
 function verdictPaint(v) {
+  if (v === 'EXIT' || v === 'STOP HIT') return red(bold('EXIT'));
   if (v === 'BUY') return green(bold('BUY'));
   if (v === 'PREP') return amber('PREP');
   if (v === 'WATCH') return amber('WATCH');
@@ -258,10 +259,20 @@ function verdictPaint(v) {
 }
 
 function borderOf(verdict) {
+  if (verdict === 'EXIT' || verdict === 'STOP HIT') return red;
   if (verdict === 'BUY') return green;
   if (verdict === 'PREP' || verdict === 'WATCH') return amber;
   if (verdict === 'TOO HOT' || verdict === 'ERROR') return red;
   return dim;
+}
+
+function cardStopHit(row) {
+  if (!row) return false;
+  if (row.stopHit || row.action === 'EXIT') return true;
+  const ltp = Number(row.ltp);
+  const lv = row.levels || {};
+  const sl = Number(row.sellStop != null ? row.sellStop : (lv.activeStop != null ? lv.activeStop : lv.stopLoss));
+  return Number.isFinite(ltp) && Number.isFinite(sl) && ltp <= sl + 1e-9;
 }
 
 function cardRow(left, right, inner, border) {
@@ -272,7 +283,10 @@ function cardRow(left, right, inner, border) {
 }
 
 function stockBox(row, inner) {
-  const border = borderOf(row.verdict);
+  const stopHit = cardStopHit(row);
+  const label = stopHit ? 'EXIT' : (row.verdict || '—');
+  const action = stopHit ? 'EXIT' : (row.action || 'WAIT');
+  const border = borderOf(stopHit ? 'EXIT' : row.verdict);
   const lines = [border('┌' + '─'.repeat(inner) + '┐')];
   if (row.error) {
     lines.push(cardRow(` ${bold(row.ticker)}`, '', inner, border));
@@ -284,16 +298,17 @@ function stockBox(row, inner) {
   const lotBit = row.lots > 0 ? ` ${row.lots}L` : '';
   const qtyBit = row.qty > 0 ? ` qty ${row.qty}${lotBit} ₹${fmt(row.spend)}` : '';
   const liveBit = row.live ? green(' LIVE') : '';
-  const waitBit = row.confirmLeftSec != null ? amber(` ${row.confirmLeftSec}s`) : '';
+  const waitBit = !stopHit && row.confirmLeftSec != null ? amber(` ${row.confirmLeftSec}s`) : '';
   const pScore = row.profitScore != null ? bold(`P${fmt(row.profitScore)}`) : dim(`${row.score || '—'}`);
   const gainerBit = row.fromGainer ? amber(' ▲') : '';
-  lines.push(cardRow(` ${bold(row.ticker)} ${verdictPaint(row.verdict)}${gainerBit}${liveBit}${waitBit}`, pScore, inner, border));
+  lines.push(cardRow(` ${bold(row.ticker)} ${verdictPaint(label)}${gainerBit}${liveBit}${waitBit}`, pScore, inner, border));
   lines.push(cardRow(clip(
     ` LTP ${fmt(row.ltp)}  RSI ${fmt(row.rsi)}${row.dayChangePct != null ? `  day ${tonePct(row.dayChangePct)}` : ''}${qtyBit}`,
     inner
   ), '', inner, border));
+  const actionTxt = stopHit ? red(bold(action)) : bold(action);
   lines.push(cardRow(clip(
-    ` SL ${red(fmt(row.sellStop || lv.stopLoss))}  T1 ${green(fmt(row.sellT1 || lv.target1))}  T2 ${green(fmt(row.sellT2 || lv.target2))}  ${bold(row.action || 'WAIT')}`,
+    ` SL ${red(fmt(row.sellStop || lv.stopLoss))}  T1 ${green(fmt(row.sellT1 || lv.target1))}  T2 ${green(fmt(row.sellT2 || lv.target2))}  ${actionTxt}`,
     inner
   ), '', inner, border));
   lines.push(border('└' + '─'.repeat(inner) + '┘'));
@@ -473,7 +488,14 @@ function renderBookPanel(state, opts = {}) {
       let next = markGainer(r);
       if (next.fromWatch) {
         const { fromWatch, ...rest } = next;
-        next = { ...rest, verdict: 'BUY', buy: 'YES', action: 'BUY' };
+        const hit = cardStopHit(rest);
+        next = {
+          ...rest,
+          verdict: 'BUY',
+          buy: hit ? 'NO' : 'YES',
+          action: hit ? 'EXIT' : 'BUY',
+          stopHit: hit,
+        };
       }
       return next;
     })
