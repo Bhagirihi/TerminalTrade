@@ -222,6 +222,16 @@ function renderUpstox(upstox, linkedFlash) {
     : 'Set UPSTOX_API_KEY and UPSTOX_API_SECRET in .env on the server, then link.';
 }
 
+function formatUserSignal(s) {
+  if (!s) return '—';
+  if (typeof s === 'string') return s;
+  const px = s.price != null
+    ? Number(s.price).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    : '—';
+  const when = s.atIst || s.at || '—';
+  return `${s.ticker || '—'} · ${when} · ₹${px}`;
+}
+
 function renderSignals(sig) {
   const el = document.getElementById('signals');
   const buys = (sig && sig.buys) || [];
@@ -231,8 +241,8 @@ function renderSignals(sig) {
     return;
   }
   el.innerHTML = [
-    ...buys.map((t) => `<div class="sig buy">BUY(USER) ==> ${t}</div>`),
-    ...sells.map((t) => `<div class="sig sell">SELL(USER) ==> ${t}</div>`),
+    ...buys.map((t) => `<div class="sig buy">BUY(USER) ==> ${formatUserSignal(t)}</div>`),
+    ...sells.map((t) => `<div class="sig sell">SELL(USER) ==> ${formatUserSignal(t)}</div>`),
   ].join('');
 }
 

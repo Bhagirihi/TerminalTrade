@@ -31,8 +31,20 @@ function istTimeStr(epochMs) {
   return `${pad(p.hour)}:${pad(p.minute)}`;
 }
 
+function istTimeSecStr(epochMs) {
+  const p = istParts(epochMs);
+  return `${pad(p.hour)}:${pad(p.minute)}:${pad(p.second)}`;
+}
+
 function istFullStr(epochMs) {
   return `${istDateKey(epochMs)} ${istTimeStr(epochMs)} IST`;
+}
+
+/** Date + time with seconds (order / signal stamps). */
+function istFullSecStr(epochMs = Date.now()) {
+  const ms = Number(epochMs);
+  const t = Number.isFinite(ms) ? ms : Date.now();
+  return `${istDateKey(t)} ${istTimeSecStr(t)} IST`;
 }
 
 // Epoch ms for a given IST wall-clock time (dateKey = 'YYYY-MM-DD', hh, mm).
@@ -41,4 +53,13 @@ function istToEpoch(dateKey, hh, mm) {
   return Date.UTC(y, m - 1, d, hh, mm) - IST_OFFSET_MS;
 }
 
-module.exports = { IST_OFFSET_MS, istParts, istDateKey, istTimeStr, istFullStr, istToEpoch };
+module.exports = {
+  IST_OFFSET_MS,
+  istParts,
+  istDateKey,
+  istTimeStr,
+  istTimeSecStr,
+  istFullStr,
+  istFullSecStr,
+  istToEpoch,
+};

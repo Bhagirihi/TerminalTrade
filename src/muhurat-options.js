@@ -544,10 +544,10 @@ async function buildMuhuratOptionsBook(provider, {
   };
 }
 
-function patchOptionsBookLtps(book, ltpByKey) {
+function patchOptionsBookLtps(book, ltpByKey, priorBook = null, positions = null) {
   if (!book || !ltpByKey) return book;
   const { patchBookLtps } = require('./muhurat');
-  return patchBookLtps(book, ltpByKey);
+  return patchBookLtps(book, ltpByKey, priorBook, positions);
 }
 
 module.exports = {

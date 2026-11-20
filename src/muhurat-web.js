@@ -25,6 +25,7 @@ const {
   readLogs,
   backfillFromPaperStates,
 } = require('./muhurat-history');
+const { collectUserSignals } = require('./muhurat-signals');
 
 function lanHost() {
   for (const list of Object.values(os.networkInterfaces())) {
@@ -156,48 +157,11 @@ function slimBook(book) {
   };
 }
 
-function userSignalsOf(book, bot) {
-  const buys = [];
-  const sells = [];
-  const seenB = new Set();
-  const seenS = new Set();
-  const phase = (book && book.phase) || {};
-  const lossGate = (bot && bot.lossGate) || (book && book.lossGate);
-  if (!(lossGate && lossGate.blocked) && phase.canDecideBuy !== false) {
-    for (const r of (book && book.liveBuys) || []) {
-      if (!r || !r.ticker || r.verdict !== 'BUY') continue;
-      if (!(Number(r.profitScore) > 12) || !(r.qty > 0) || r.orderReady === false) continue;
-      if (seenB.has(r.ticker)) continue;
-      seenB.add(r.ticker);
-      buys.push(r.ticker);
-    }
-  }
-  const err = String((bot && bot.lastError) || '');
-  const m = err.match(/^BUY\s+([A-Z0-9 .&-]+)\s*:/i);
-  if (m && m[1] && !seenB.has(m[1].trim())) buys.unshift(m[1].trim());
-  const exitOnly = phase.phase === 'exit_only' || phase.phase === 'closed';
-  for (const p of (bot && bot.positions) || []) {
-    if (!p || !p.ticker || !(p.qty > 0) || seenS.has(p.ticker)) continue;
-    const last = Number(p.last);
-    const stop = Number(p.stop);
-    const t2 = Number(p.t2);
-    if (
-      exitOnly
-      || (Number.isFinite(last) && Number.isFinite(stop) && last <= stop)
-      || (Number.isFinite(last) && Number.isFinite(t2) && last >= t2)
-    ) {
-      seenS.add(p.ticker);
-      sells.push(p.ticker);
-    }
-  }
-  return { buys: buys.slice(0, 8), sells: sells.slice(0, 8) };
-}
-
 function payloadFromState(state) {
   const mode = (state && state.mode) || 'equity';
-  const stockSignals = userSignalsOf(state && state.book, state && state.bot);
+  const stockSignals = collectUserSignals(state && state.book, state && state.bot);
   const optSignals = mode === 'both'
-    ? userSignalsOf(state && state.optionsBook, state && state.optionsBot)
+    ? collectUserSignals(state && state.optionsBook, state && state.optionsBot)
     : { buys: [], sells: [] };
   const upstox = upstoxLinkStatus();
   return {

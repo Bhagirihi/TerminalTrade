@@ -11,6 +11,9 @@ const {
   portfolioLossGate,
   optionsIdleStatus,
   pushLogChange,
+  fillIsComplete,
+  fillIsRejected,
+  tradesOpenedCount,
 } = require('../src/muhurat-bot');
 
 test('liveEnabled requires live + confirm + BUY approval', () => {
@@ -127,4 +130,26 @@ test('pushLogChange only records when message changes', () => {
   assert.equal(pushLogChange(state, 'waiting', 'same'), false);
   assert.equal(pushLogChange(state, 'waiting', 'changed'), true);
   assert.equal(state.log.length, 2);
+});
+
+test('fillIsComplete rejects failed broker statuses', () => {
+  assert.equal(fillIsComplete(null), false);
+  assert.equal(fillIsComplete({ status: 'rejected' }), false);
+  assert.equal(fillIsComplete({ status: 'cancelled' }), false);
+  assert.equal(fillIsComplete({ status: 'complete', averagePrice: 100 }), true);
+  assert.equal(fillIsRejected({ status: 'rejected' }), true);
+  assert.equal(fillIsRejected({ status: 'complete' }), false);
+});
+
+test('tradesOpenedCount prefers max of state positions and tradesToday', () => {
+  const state = {
+    date: '2099-01-04',
+    bookMode: 'options',
+    tradesToday: 1,
+    positions: {
+      a: { status: 'CLOSED', buyOrderId: '1' },
+      b: { status: 'CLOSED', buyOrderId: '2' },
+    },
+  };
+  assert.equal(tradesOpenedCount(state), 2);
 });

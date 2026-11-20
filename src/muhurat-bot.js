@@ -7,7 +7,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { istDateKey, istFullStr } = require('./time');
+const { istDateKey, istFullStr, istFullSecStr } = require('./time');
 const {
   sessionPhase,
   DEFAULT_BUDGET,
@@ -25,6 +25,7 @@ const {
   recordBuy,
   recordSell,
   syncFromBotState,
+  countTradesForDay,
 } = require('./muhurat-history');
 
 const PAPER_DIR = path.join(__dirname, '..', 'paper');
@@ -122,10 +123,34 @@ function emptyState(day, mode = 'equity') {
 }
 
 function tradesOpenedCount(state) {
-  if (Number.isFinite(Number(state.tradesToday)) && Number(state.tradesToday) >= 0) {
-    return Math.floor(Number(state.tradesToday));
+  const mode = bookModeOf(state.bookMode || state.mode);
+  const fromPositions = Object.values(state.positions || {}).filter(
+    (p) => p && (p.buyOrderId || p.status === 'OPEN' || p.status === 'CLOSED')
+  ).length;
+  const fromState = Number.isFinite(Number(state.tradesToday)) && Number(state.tradesToday) >= 0
+    ? Math.floor(Number(state.tradesToday))
+    : 0;
+  let fromHistory = 0;
+  try {
+    fromHistory = countTradesForDay(state.date, mode);
+  } catch (_) {
+    fromHistory = 0;
   }
-  return Object.values(state.positions || {}).filter((p) => p && (p.buyOrderId || p.status === 'OPEN' || p.status === 'CLOSED')).length;
+  // Max across sources so a wiped state file cannot re-open beyond the day cap.
+  return Math.max(fromState, fromPositions, fromHistory);
+}
+
+function fillIsComplete(fill) {
+  if (!fill) return false;
+  const st = String(fill.status || '').toLowerCase();
+  if (/reject|cancel|fail/.test(st)) return false;
+  return /complete|completed|traded|filled/.test(st)
+    || (fill.averagePrice != null && Number(fill.averagePrice) > 0);
+}
+
+function fillIsRejected(fill) {
+  if (!fill) return false;
+  return /reject|cancel|fail/.test(String(fill.status || '').toLowerCase());
 }
 
 function bookModeOf(bookOrMode) {
@@ -270,6 +295,58 @@ function viewOf(state, phase) {
   };
 }
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function orderStatusOf(row) {
+  return String((row && (row.status || row.order_status || row.orderStatus)) || '').toLowerCase();
+}
+
+function orderAvgPrice(row) {
+  const n = Number(
+    row && (row.average_price != null ? row.average_price
+      : row.averagePrice != null ? row.averagePrice
+        : row.price)
+  );
+  return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null;
+}
+
+function orderTimeMs(row) {
+  const raw = row && (row.exchange_timestamp || row.order_timestamp || row.timestamp || row.order_time);
+  if (!raw) return Date.now();
+  const t = Date.parse(raw);
+  return Number.isFinite(t) ? t : Date.now();
+}
+
+/** Poll Upstox until order is complete/rejected (or timeout). */
+async function waitOrderResult(provider, orderId, { tries = 10, delayMs = 350 } = {}) {
+  if (!orderId || !provider || typeof provider.getOrders !== 'function') return null;
+  for (let i = 0; i < tries; i += 1) {
+    await sleep(delayMs);
+    let orders = [];
+    try {
+      orders = await provider.getOrders();
+    } catch (_) {
+      continue;
+    }
+    const hit = (Array.isArray(orders) ? orders : []).find(
+      (o) => String(o.order_id || o.orderId || '') === String(orderId)
+    );
+    if (!hit) continue;
+    const status = orderStatusOf(hit);
+    const done = /complete|completed|traded|filled|rejected|cancelled|canceled|failed/.test(status);
+    if (done) {
+      return {
+        status: hit.status || hit.order_status || status,
+        averagePrice: orderAvgPrice(hit),
+        atMs: orderTimeMs(hit),
+      };
+    }
+  }
+  return null;
+}
+
 async function placeBuy(provider, pick, product) {
   // Long only — BUY CE / BUY PE / stocks. Never sell-to-open options.
   if (paperEnabled() && !liveEnabled()) {
@@ -285,9 +362,37 @@ async function placeBuy(provider, pick, product) {
   });
 }
 
+async function orderStillOpen(provider, orderId) {
+  if (!orderId || !provider || typeof provider.getOrders !== 'function') return null;
+  try {
+    const orders = await provider.getOrders();
+    const hit = (Array.isArray(orders) ? orders : []).find(
+      (o) => String(o.order_id || o.orderId || '') === String(orderId)
+    );
+    if (!hit) return false;
+    const st = orderStatusOf(hit);
+    if (/complete|completed|traded|filled|rejected|cancelled|canceled|failed/.test(st)) return false;
+    return /open|pending|trigger|modified|after\s*market|amo/.test(st) || st.length > 0;
+  } catch (_) {
+    return null;
+  }
+}
+
 async function placeOrReplaceStop(provider, pos, stop, product) {
   if (!pos || pos.status === 'CLOSED' || pos.exiting || !(pos.qty > 0)) return;
-  const trigger = roundTick(stop);
+  let trigger = roundTick(stop);
+  const floor = Math.max(
+    Number(pos.initialStop) || 0,
+    Number(pos.stop) || 0
+  );
+  // Long-only: never send a lower SL-M to the broker.
+  if (floor > 0 && trigger < floor - 1e-9) trigger = roundTick(floor);
+  const ltp = Number(pos.last != null ? pos.last : pos.entry);
+  // Long SL-M must stay strictly below LTP or the broker rejects / fires instantly.
+  if (Number.isFinite(ltp) && ltp > 0 && trigger >= ltp - 1e-9) {
+    pos.stop = floor > 0 ? Math.min(floor, roundTick(ltp * 0.999)) : roundTick(ltp * 0.999);
+    return; // hard LTP exit path will flatten if already at/through stop
+  }
   if (paperEnabled() && !liveEnabled()) {
     pos.stop = trigger;
     pos.slOrderId = pos.slOrderId || `PAPER-SL-${Date.now()}`;
@@ -305,10 +410,27 @@ async function placeOrReplaceStop(provider, pos, stop, product) {
       pos.stop = trigger;
       return;
     } catch (_) {
+      const oldId = pos.slOrderId;
       try {
-        await provider.cancelOrder(pos.slOrderId);
+        await provider.cancelOrder(oldId);
       } catch (_) {
-        /* continue to place fresh */
+        /* may already be filled */
+      }
+      const still = await orderStillOpen(provider, oldId);
+      if (still === true) {
+        throw new Error(`SL replace blocked — old SL-M ${oldId} still open`);
+      }
+      // still === false → gone; null → unknown: only place new if net still long
+      if (still === null) {
+        const net = await netQtyOpen(provider, pos.key);
+        if (net != null && net <= 0) {
+          pos.qty = 0;
+          pos.slOrderId = null;
+          return;
+        }
+        if (net == null) {
+          throw new Error(`SL replace blocked — cannot verify old SL-M ${oldId}`);
+        }
       }
       pos.slOrderId = null;
     }
@@ -363,23 +485,38 @@ async function netQtyOpen(provider, instrumentToken) {
 
 // One exit only: cancel resting SL-M first, then a single market SELL.
 // If SL-M already filled (cancel fails / net qty 0), skip — avoids naked short.
-async function marketSell(provider, pos, product) {
+async function marketSell(provider, pos, product, state = null) {
   if (!pos || pos.status === 'CLOSED' || pos.exiting) return null;
   if (!(pos.qty > 0)) return null;
   pos.exiting = true;
+  const paper = paperEnabled() && !liveEnabled();
   const cancelled = await cancelStopOrder(provider, pos);
-  if (!cancelled && !(paperEnabled() && !liveEnabled())) {
+  if (!cancelled && !paper) {
     const net = await netQtyOpen(provider, pos.key);
     if (net != null && net <= 0) {
       pos.qty = 0;
       return { order_id: null, alreadyFlat: true };
     }
+    // Cannot verify broker qty → do not risk a naked short after SL-M may have filled.
+    if (net == null) {
+      pos.exiting = false;
+      throw new Error(`SELL ${pos.ticker}: cannot verify position after SL cancel — skipped market sell`);
+    }
+    if (net > 0 && net < pos.qty) pos.qty = net;
   }
-  if (paperEnabled() && !liveEnabled()) {
-    return { order_id: `PAPER-SELL-${Date.now()}`, paper: true };
+  const qty = pos.qty;
+  const ltp = Number(pos.last != null ? pos.last : pos.entry);
+  if (state) {
+    pushLog(state, `${paper ? 'PAPER ' : ''}ORDER SEND SELL ${pos.ticker} qty ${qty} @~${Number.isFinite(ltp) ? ltp : '—'}${paper ? '' : ' → Upstox'} · ${istFullSecStr()}`);
+  }
+  if (paper) {
+    if (state) {
+      pushLog(state, `PAPER ORDER FILLED SELL ${pos.ticker} qty ${qty} @~${Number.isFinite(ltp) ? ltp : '—'} · ${istFullSecStr()}`);
+    }
+    return { order_id: `PAPER-SELL-${Date.now()}`, paper: true, averagePrice: ltp };
   }
   try {
-    return await provider.placeOrder({
+    const placed = await provider.placeOrder({
       instrumentToken: pos.key,
       quantity: pos.qty,
       transactionType: 'SELL',
@@ -387,6 +524,19 @@ async function marketSell(provider, pos, product) {
       product,
       tag: TAG,
     });
+    const orderId = placed && (placed.order_id || placed.orderId);
+    if (state && orderId) {
+      pushLog(state, `ORDER ACK SELL ${pos.ticker} order ${orderId} accepted by Upstox · ${istFullSecStr()}`);
+      const fill = await waitOrderResult(provider, orderId);
+      if (fill) {
+        const avg = fill.averagePrice != null ? fill.averagePrice : ltp;
+        pushLog(state, `ORDER FILLED SELL ${pos.ticker} qty ${qty} avg ₹${avg} status ${fill.status} · ${istFullSecStr(fill.atMs)}`);
+        placed.averagePrice = avg;
+      } else {
+        pushLog(state, `ORDER PENDING SELL ${pos.ticker} order ${orderId} — no fill confirm yet · ${istFullSecStr()}`);
+      }
+    }
+    return placed;
   } catch (e) {
     pos.exiting = false; // allow retry if broker rejected
     throw e;
@@ -468,8 +618,102 @@ function isStaticIpBlock(err) {
   return msg.includes('UDAPI1154') || /static IP/i.test(msg);
 }
 
+async function promotePendingBuy(provider, state, ticker, pending, fill, product) {
+  const mode = bookModeOf(state.bookMode || state.mode);
+  const fillPx = fill.averagePrice != null ? Number(fill.averagePrice) : Number(pending.quote);
+  if (!(fillPx > 0) || !(pending.qty > 0)) return false;
+  let initialStop = Number(pending.sellStop);
+  if (mode === 'options') {
+    const forced = optionsInitialStop(fillPx, 0.05);
+    if (forced != null) initialStop = forced;
+  } else if (!Number.isFinite(initialStop) || initialStop >= fillPx - 1e-9) {
+    initialStop = roundTick(fillPx * 0.992);
+  }
+  const buyAt = new Date().toISOString();
+  const pos = {
+    ticker,
+    key: pending.key,
+    qty: pending.qty,
+    closedQty: pending.qty,
+    entry: fillPx,
+    last: fillPx,
+    right: pending.right || null,
+    initialStop,
+    stop: initialStop,
+    t1: pending.sellT1,
+    t2: pending.sellT2,
+    buyOrderId: pending.orderId,
+    slOrderId: null,
+    stage: 0,
+    peak: fillPx,
+    trailArmAt: null,
+    trailLabel: mode === 'options' ? `initial SL −${optionsStopLossPct()}%` : 'initial SL',
+    spend: Number(pending.spend) || fillPx * pending.qty,
+    status: 'OPEN',
+    buyAt,
+  };
+  state.positions[ticker] = pos;
+  state.tradesToday = tradesOpenedCount(state);
+  try {
+    recordBuy({
+      day: state.date,
+      mode,
+      ticker: pos.ticker,
+      key: pos.key,
+      qty: pos.qty,
+      entry: pos.entry,
+      spend: pos.spend,
+      right: pos.right,
+      at: buyAt,
+    });
+  } catch (_) { /* best-effort */ }
+  pushLog(state, `BUY ${ticker} qty ${pos.qty} @~${fillPx} order ${pending.orderId} (pending→filled) · ${istFullSecStr()}`);
+  try {
+    await placeOrReplaceStop(provider, pos, pos.stop, product);
+  } catch (e) {
+    state.lastError = `SL ${ticker}: ${e.message}`;
+    pushLog(state, state.lastError);
+  }
+  return true;
+}
+
+async function resolvePendingBuys(provider, state, product) {
+  const pending = state.pendingBuys || {};
+  const tickers = Object.keys(pending);
+  if (!tickers.length) return;
+  for (const ticker of tickers) {
+    const row = pending[ticker];
+    if (!row || !row.orderId) {
+      delete pending[ticker];
+      continue;
+    }
+    if (state.positions[ticker] && state.positions[ticker].qty > 0) {
+      delete pending[ticker];
+      continue;
+    }
+    const fill = await waitOrderResult(provider, row.orderId, { tries: 2, delayMs: 200 });
+    if (fillIsComplete(fill)) {
+      pushLog(state, `ORDER FILLED BUY ${ticker} order ${row.orderId} avg ₹${fill.averagePrice != null ? fill.averagePrice : row.quote} · ${istFullSecStr(fill.atMs)}`);
+      await promotePendingBuy(provider, state, ticker, row, fill, product);
+      delete pending[ticker];
+    } else if (fillIsRejected(fill)) {
+      pushLog(state, `ORDER REJECT BUY ${ticker} order ${row.orderId} status ${fill.status} · ${istFullSecStr(fill.atMs)}`);
+      state.failedBuys = state.failedBuys || {};
+      state.failedBuys[ticker] = Date.now() + 60 * 1000;
+      delete pending[ticker];
+    } else if (Date.now() - (row.at || 0) > 5 * 60 * 1000) {
+      pushLog(state, `ORDER PENDING BUY ${ticker} order ${row.orderId} timed out (5m) — cleared · ${istFullSecStr()}`);
+      state.failedBuys = state.failedBuys || {};
+      state.failedBuys[ticker] = Date.now() + 60 * 1000;
+      delete pending[ticker];
+    }
+  }
+  state.pendingBuys = pending;
+}
+
 async function enterFromBook(provider, state, book, product) {
   book = await attachPortfolio(provider, book);
+  await resolvePendingBuys(provider, state, product);
   const lossGate = portfolioLossGate(book);
   state.lossGate = lossGate;
   if (lossGate.blocked) {
@@ -496,8 +740,9 @@ async function enterFromBook(provider, state, book, product) {
   if (!picks.length) {
     const warming = (book.budget && book.budget.confirming) || [];
     if (warming.length) {
-      const tip = warming.slice(0, 3).map((r) => `${r.ticker} ${r.confirmLeftSec || '?'}s`).join(', ');
-      pushLogChange(state, 'waiting', `Waiting confirm (${tip}) — no order yet`);
+      // Dedupe by ticker names only — omit countdown seconds (they change every tick).
+      const tip = warming.slice(0, 3).map((r) => r.ticker).join(', ');
+      pushLogChange(state, `waiting:${tip}`, `Waiting confirm (${tip}) — no order yet`);
     } else if (mode === 'options') {
       pushLogChange(state, 'waiting', optionsIdleStatus(book, state));
     } else {
@@ -537,6 +782,17 @@ async function enterFromBook(provider, state, book, product) {
     if (state.positions[pick.ticker] && state.positions[pick.ticker].status === 'CLOSED') continue;
     // Failed earlier this session — don't hammer the same name until backoff clears.
     if (state.failedBuys && state.failedBuys[pick.ticker] && Date.now() < state.failedBuys[pick.ticker]) continue;
+    const planSl = Number(pick.sellStop != null ? pick.sellStop : pick.levels && pick.levels.stopLoss);
+    const planLtp = Number(pick.ltp);
+    // Long: never enter when planned SL is already at/above LTP (would reject or instant-stop).
+    if (Number.isFinite(planSl) && Number.isFinite(planLtp) && planSl >= planLtp - 1e-9) {
+      pushLogChange(
+        state,
+        `slAbove:${pick.ticker}`,
+        `Skip ${pick.ticker} — SL ${planSl} ≥ LTP ${planLtp} (wait for valid stop below price)`
+      );
+      continue;
+    }
     const need = Number(pick.spend) || pick.qty * pick.ltp;
     if (Number.isFinite(hard) && hard > 0 && need > hard + 1) {
       unaffordable.push({ ticker: pick.ticker, need: Math.ceil(need), hard });
@@ -547,13 +803,58 @@ async function enterFromBook(provider, state, book, product) {
       continue;
     }
     try {
+      const entry = Number(pick.ltp);
+      const paper = paperEnabled() && !liveEnabled();
+      pushLog(state, `${paper ? 'PAPER ' : ''}ORDER SEND BUY ${pick.ticker} qty ${pick.qty} @~${entry}${paper ? '' : ' → Upstox'} · ${istFullSecStr()}`);
       const placed = await placeBuy(provider, pick, product);
       const orderId = placed && (placed.order_id || placed.orderId);
-      const entry = Number(pick.ltp);
-      let initialStop = pick.sellStop || (pick.levels && pick.levels.stopLoss);
+      let fill = null;
+      if (paper) {
+        pushLog(state, `PAPER ORDER FILLED BUY ${pick.ticker} qty ${pick.qty} @~${entry} · ${istFullSecStr()}`);
+        fill = { status: 'complete', averagePrice: entry, atMs: Date.now() };
+      } else if (orderId) {
+        pushLog(state, `ORDER ACK BUY ${pick.ticker} order ${orderId} accepted by Upstox · ${istFullSecStr()}`);
+        fill = await waitOrderResult(provider, orderId);
+        if (fillIsComplete(fill)) {
+          const avg = fill.averagePrice != null ? fill.averagePrice : entry;
+          pushLog(state, `ORDER FILLED BUY ${pick.ticker} qty ${pick.qty} avg ₹${avg} status ${fill.status} · ${istFullSecStr(fill.atMs)}`);
+        } else if (fillIsRejected(fill)) {
+          pushLog(state, `ORDER REJECT BUY ${pick.ticker} order ${orderId} status ${fill.status} · ${istFullSecStr(fill.atMs)}`);
+          state.failedBuys = state.failedBuys || {};
+          state.failedBuys[pick.ticker] = Date.now() + 60 * 1000;
+          continue;
+        } else {
+          // No confirmed fill — do NOT open a local position (avoids phantom inventory).
+          pushLog(state, `ORDER PENDING BUY ${pick.ticker} order ${orderId} — waiting fill, not booking yet · ${istFullSecStr()}`);
+          state.pendingBuys = state.pendingBuys || {};
+          state.pendingBuys[pick.ticker] = {
+            orderId,
+            key: pick.key,
+            qty: pick.qty,
+            right: pick.right || null,
+            sellStop: planSl,
+            sellT1: pick.sellT1 || (pick.levels && pick.levels.target1),
+            sellT2: pick.sellT2 || (pick.levels && pick.levels.target2),
+            spend: Number(pick.spend) || null,
+            quote: entry,
+            at: Date.now(),
+          };
+          continue;
+        }
+      } else if (!paper) {
+        pushLog(state, `ORDER FAIL BUY ${pick.ticker} — no order id from Upstox · ${istFullSecStr()}`);
+        state.failedBuys = state.failedBuys || {};
+        state.failedBuys[pick.ticker] = Date.now() + 60 * 1000;
+        continue;
+      }
+      if (!fillIsComplete(fill) && !paper) continue;
+      const fillPx = fill && fill.averagePrice != null ? Number(fill.averagePrice) : entry;
+      let initialStop = planSl;
       if (mode === 'options') {
-        const forced = optionsInitialStop(entry, 0.05);
+        const forced = optionsInitialStop(fillPx, 0.05);
         if (forced != null) initialStop = forced;
+      } else if (!Number.isFinite(Number(initialStop)) || Number(initialStop) >= fillPx - 1e-9) {
+        initialStop = roundTick(fillPx * 0.992);
       }
       const buyAt = new Date().toISOString();
       const pos = {
@@ -561,7 +862,8 @@ async function enterFromBook(provider, state, book, product) {
         key: pick.key,
         qty: pick.qty,
         closedQty: pick.qty,
-        entry,
+        entry: fillPx,
+        last: fillPx,
         right: pick.right || null,
         initialStop,
         stop: initialStop,
@@ -570,14 +872,15 @@ async function enterFromBook(provider, state, book, product) {
         buyOrderId: orderId,
         slOrderId: null,
         stage: 0,
-        peak: entry,
+        peak: fillPx,
         trailArmAt: null,
         trailLabel: mode === 'options' ? `initial SL −${optionsStopLossPct()}%` : 'initial SL',
-        spend: Number(pick.spend) || entry * pick.qty,
+        spend: Number(pick.spend) || fillPx * pick.qty,
         status: 'OPEN',
         buyAt,
       };
       state.positions[pick.ticker] = pos;
+      if (state.pendingBuys) delete state.pendingBuys[pick.ticker];
       spent += pos.spend;
       tradesToday += 1;
       state.tradesToday = tradesToday;
@@ -596,18 +899,27 @@ async function enterFromBook(provider, state, book, product) {
       } catch (_) {
         /* history is best-effort */
       }
-      const tagBuy = (paperEnabled() && !liveEnabled()) ? 'PAPER BUY' : 'BUY';
-      pushLog(state, `${tagBuy} ${pick.ticker} qty ${pick.qty} @~${entry} order ${orderId || '?'} (${tradesToday}/${tradeCap || '∞'})`);
+      const tagBuy = paper ? 'PAPER BUY' : 'BUY';
+      pushLog(state, `${tagBuy} ${pick.ticker} qty ${pick.qty} @~${fillPx} order ${orderId || '?'} (${tradesToday}/${tradeCap || '∞'}) · ${istFullSecStr()}`);
       try {
+        if (!paper) {
+          pushLog(state, `ORDER SEND SELL ${pick.ticker} qty ${pick.qty} SL-M trigger ${pos.stop} → Upstox · ${istFullSecStr()}`);
+        }
         await placeOrReplaceStop(provider, pos, pos.stop, product);
-        pushLog(state, `${(paperEnabled() && !liveEnabled()) ? 'PAPER SL' : 'SL-M'} ${pick.ticker} @ ${pos.stop}`);
+        if (paper) {
+          pushLog(state, `PAPER SL ${pick.ticker} @ ${pos.stop} · ${istFullSecStr()}`);
+        } else if (pos.slOrderId) {
+          pushLog(state, `ORDER ACK SELL ${pick.ticker} SL-M order ${pos.slOrderId} @ ${pos.stop} · ${istFullSecStr()}`);
+        } else {
+          pushLog(state, `SL-M ${pick.ticker} @ ${pos.stop} · ${istFullSecStr()}`);
+        }
       } catch (e) {
         state.lastError = `SL ${pick.ticker}: ${e.message}`;
         pushLog(state, state.lastError);
       }
     } catch (e) {
       state.lastError = `BUY ${pick.ticker}: ${e.message}`;
-      pushLog(state, state.lastError);
+      pushLog(state, `${state.lastError} · ${istFullSecStr()}`);
       if (isStaticIpBlock(e)) {
         state.orderBlockUntil = Date.now() + 15 * 60 * 1000;
         state.failedBuys = state.failedBuys || {};
@@ -669,6 +981,16 @@ function markClosed(pos, reason, { day, mode, ltp } = {}) {
   }
 }
 
+async function syncStopOrderFill(provider, state, pos, mode, ltp) {
+  if (!pos || !pos.slOrderId || (paperEnabled() && !liveEnabled())) return false;
+  const fill = await waitOrderResult(provider, pos.slOrderId, { tries: 1, delayMs: 0 });
+  if (!fillIsComplete(fill)) return false;
+  const exitPx = fill.averagePrice != null ? fill.averagePrice : ltp;
+  markClosed(pos, 'SL-M', { day: state.date, mode, ltp: exitPx });
+  pushLog(state, `ORDER FILLED SELL ${pos.ticker} SL-M order ${pos.slOrderId} avg ₹${exitPx} · ${istFullSecStr(fill.atMs)}`);
+  return true;
+}
+
 async function managePositions(provider, state, ltpByKey, product) {
   const mode = bookModeOf(state.bookMode || state.mode);
   for (const pos of Object.values(state.positions)) {
@@ -676,50 +998,71 @@ async function managePositions(provider, state, ltpByKey, product) {
     const ltp = ltpByKey.get(pos.key);
     if (!Number.isFinite(ltp)) continue;
     pos.last = ltp;
-    // Options hard rule: −5% from entry → cancel SL-M then one market exit.
-    if (mode === 'options' && Number.isFinite(pos.entry) && pos.entry > 0) {
-      const slPct = optionsStopLossPct();
-      const hardSl = pos.initialStop != null
+    // Broker SL-M may have filled without our market-sell path — sync local book.
+    try {
+      if (await syncStopOrderFill(provider, state, pos, mode, ltp)) continue;
+    } catch (_) { /* best-effort */ }
+    // Hard LTP stop for stocks + options (paper and live). Options also keep −5% floor.
+    const hardSl = mode === 'options' && Number.isFinite(pos.entry) && pos.entry > 0
+      ? (pos.initialStop != null
         ? Number(pos.initialStop)
-        : pos.entry * (1 - slPct / 100);
-      if (Number.isFinite(hardSl) && ltp <= hardSl + 1e-9) {
-        try {
-          await marketSell(provider, pos, product);
-          markClosed(pos, `SL-${slPct}%`, { day: state.date, mode, ltp });
-          pushLog(state, `SELL ${pos.ticker} SL −${slPct}% @~${ltp} (BUY ${pos.right || 'CE/PE'} exit only)`);
-        } catch (e) {
-          state.lastError = `SL exit ${pos.ticker}: ${e.message}`;
-          pushLog(state, state.lastError);
-        }
-        continue;
+        : pos.entry * (1 - optionsStopLossPct() / 100))
+      : Number(pos.stop != null ? pos.stop : pos.initialStop);
+    if (Number.isFinite(hardSl) && ltp <= hardSl + 1e-9) {
+      try {
+        const reason = mode === 'options' ? `SL-${optionsStopLossPct()}%` : 'SL';
+        await marketSell(provider, pos, product, state);
+        markClosed(pos, reason, { day: state.date, mode, ltp });
+        const tag = mode === 'options'
+          ? `SELL ${pos.ticker} SL −${optionsStopLossPct()}% @~${ltp} (BUY ${pos.right || 'CE/PE'} exit only)`
+          : `SELL ${pos.ticker} SL @~${ltp}`;
+        pushLog(state, `${tag} · ${istFullSecStr()}`);
+      } catch (e) {
+        state.lastError = `SL exit ${pos.ticker}: ${e.message}`;
+        pushLog(state, state.lastError);
       }
+      continue;
     }
     const trail = positionTrail(pos, ltp, mode);
     pos.peak = trail.peak;
     pos.trailArmAt = trail.trailArmAt;
     pos.trailLabel = trail.trailLabel;
-    const stop = trail.activeStop;
-    const stage = trail.trailStage;
     const curStop = Number(pos.stop);
+    const initStop = Number(pos.initialStop != null ? pos.initialStop : curStop);
+    // Long-only: SL never moves down (trail may only raise).
+    let stop = Number(trail.activeStop);
+    if (Number.isFinite(initStop)) stop = Math.max(stop || initStop, initStop);
+    if (Number.isFinite(curStop)) stop = Math.max(stop || curStop, curStop);
+    const stage = trail.trailStage;
     const raised = Number.isFinite(stop) && (!Number.isFinite(curStop) || stop > curStop + 1e-9);
     if (raised || stage > (pos.stage || 0)) {
       pos.stage = Math.max(stage, pos.stage || 0);
       if (raised) {
         try {
+          const paper = paperEnabled() && !liveEnabled();
+          if (!paper) {
+            pushLog(state, `ORDER SEND SELL ${pos.ticker} qty ${pos.qty} SL-M trail ${trail.trailLabel} trigger ${stop} → Upstox · ${istFullSecStr()}`);
+          }
           await placeOrReplaceStop(provider, pos, stop, product);
-          pushLog(state, `Trail ${pos.ticker} ${trail.trailLabel} SL→${stop}`);
+          if (paper) {
+            pushLog(state, `PAPER Trail ${pos.ticker} ${trail.trailLabel} SL→${stop} · ${istFullSecStr()}`);
+          } else if (pos.slOrderId) {
+            pushLog(state, `ORDER ACK SELL ${pos.ticker} SL-M order ${pos.slOrderId} @ ${stop} · ${istFullSecStr()}`);
+          } else {
+            pushLog(state, `Trail ${pos.ticker} ${trail.trailLabel} SL→${stop} · ${istFullSecStr()}`);
+          }
         } catch (e) {
           state.lastError = `Trail ${pos.ticker}: ${e.message}`;
-          pushLog(state, state.lastError);
+          pushLog(state, `${state.lastError} · ${istFullSecStr()}`);
         }
       }
     }
     // Soft take-profit at T2: market sell (closes long BUY CE/PE — not sell-to-open)
     if (Number.isFinite(pos.t2) && ltp >= pos.t2) {
       try {
-        await marketSell(provider, pos, product);
+        await marketSell(provider, pos, product, state);
         markClosed(pos, 'T2', { day: state.date, mode, ltp });
-        pushLog(state, `SELL ${pos.ticker} T2 hit @~${ltp}`);
+        pushLog(state, `SELL ${pos.ticker} T2 hit @~${ltp} · ${istFullSecStr()}`);
       } catch (e) {
         state.lastError = `T2 sell ${pos.ticker}: ${e.message}`;
         pushLog(state, state.lastError);
@@ -734,19 +1077,35 @@ async function squareOffAll(provider, state, product) {
     if (!pos || !(pos.qty > 0) || pos.status === 'CLOSED' || pos.exiting) continue;
     try {
       const qty = pos.qty;
-      await marketSell(provider, pos, product);
+      const sold = await marketSell(provider, pos, product, state);
+      if (sold && sold.alreadyFlat) {
+        markClosed(pos, '15:15', {
+          day: state.date,
+          mode: bookModeOf(state.bookMode || state.mode),
+          ltp: pos.last,
+        });
+        pushLog(state, `SQUARE-OFF ${pos.ticker} already flat · ${istFullSecStr()}`);
+        continue;
+      }
       markClosed(pos, '15:15', {
         day: state.date,
         mode: bookModeOf(state.bookMode || state.mode),
         ltp: pos.last,
       });
-      pushLog(state, `SQUARE-OFF ${pos.ticker} qty ${qty}`);
+      pushLog(state, `SQUARE-OFF ${pos.ticker} qty ${qty} · ${istFullSecStr()}`);
     } catch (e) {
       state.lastError = `Square-off ${pos.ticker}: ${e.message}`;
       pushLog(state, state.lastError);
     }
   }
-  state.squaredOff = true;
+  // Only mark done when nothing remains open — failed sells retry next tick.
+  const stillOpen = Object.values(state.positions || {}).some(
+    (p) => p && p.qty > 0 && p.status !== 'CLOSED'
+  );
+  state.squaredOff = !stillOpen;
+  if (stillOpen) {
+    pushLogChange(state, 'squareOffRetry', `Square-off incomplete — will retry · ${istFullSecStr()}`);
+  }
 }
 
 function createMuhuratBot(provider, { mode = 'equity', budget, enforceBudget = false } = {}) {
@@ -826,4 +1185,7 @@ module.exports = {
   stopForStage,
   optionsIdleStatus,
   pushLogChange,
+  tradesOpenedCount,
+  fillIsComplete,
+  fillIsRejected,
 };

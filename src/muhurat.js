@@ -355,6 +355,16 @@ function pxAtPct(entry, pct) {
   return r2(roundTick(entry * (1 + Number(pct) / 100)));
 }
 
+/** Long-only: stop / target floors only rise — never widen risk as price falls. */
+function ratchetLongLevel(prev, next) {
+  const a = Number(prev);
+  const b = Number(next);
+  if (Number.isFinite(a) && Number.isFinite(b)) return r2(Math.max(a, b));
+  if (Number.isFinite(b)) return r2(b);
+  if (Number.isFinite(a)) return r2(a);
+  return null;
+}
+
 // Step profit-lock trail (muhurat2).
 // Stocks: +2.5% (hold armHoldSec) → lock +1.5%; then +1% steps.
 // Options: +5% → cost; +10% → +10%; then +5% steps.
@@ -407,7 +417,8 @@ function trailPlan(entry, initialStop, t1, t2, last = entry, opts = {}) {
       lockPct = 0;
       label = `trail → cost (options +${cfg.bePct}%)`;
     }
-    if (stage >= 1 && init != null && active < init) active = init;
+    // Never below initial SL (long).
+    if (init != null && Number.isFinite(init) && active < init) active = init;
     return {
       entry: cost,
       trailCost: bePx,
@@ -443,7 +454,7 @@ function trailPlan(entry, initialStop, t1, t2, last = entry, opts = {}) {
       label = `trail → +${lockPct}% (stock)`;
     }
   }
-  if (stage >= 1 && init != null && active < init) active = init;
+  if (init != null && Number.isFinite(init) && active < init) active = init;
 
   return {
     entry: cost,
@@ -765,14 +776,8 @@ function withTradeSignals(row, phaseInfo) {
 
   row.entry = entry;
   row.buy = row.verdict === 'BUY' ? 'YES' : (row.verdict === 'PREP' ? 'LATER' : 'NO');
-  let sellStop = lv.activeStop != null ? lv.activeStop : lv.stopLoss;
-  // Long options signal: SL must stay below LTP (never show a stop above the quote).
-  if (trailModeOf(row.mode) === 'options' && Number.isFinite(row.ltp) && row.ltp > 0
-    && Number.isFinite(sellStop) && sellStop >= row.ltp
-    && row.positionEntry == null && row.filledEntry == null) {
-    const forced = optionsInitialStop(row.ltp, 0.05);
-    sellStop = forced != null ? forced : r2(row.ltp * (1 - optionsStopLossPct() / 100));
-  }
+  // Never lower SL to sit under a falling LTP — if stop >= LTP, keep stop (do not buy / exit).
+  const sellStop = lv.activeStop != null ? lv.activeStop : lv.stopLoss;
   row.sellStop = sellStop;
   row.sellT1 = lv.target1;
   row.sellT2 = lv.target2;
@@ -788,31 +793,165 @@ function withTradeSignals(row, phaseInfo) {
   return row;
 }
 
+function indexBookRows(book) {
+  const map = new Map();
+  if (!book) return map;
+  for (const list of [
+    book.core, book.prep, book.liveBuys, book.extrasBuy,
+    book.extrasWatch, book.extrasSkipHot, book.topGainers,
+  ]) {
+    for (const row of list || []) {
+      if (row && row.key) map.set(row.key, row);
+    }
+  }
+  return map;
+}
+
+/** Carry locked SL / targets / fill stamps across a full book rebuild. */
+function inheritLevelLocks(priorBook, book) {
+  if (!book) return book;
+  const prior = indexBookRows(priorBook);
+  if (!prior.size) return book;
+  const mergeRow = (row) => {
+    if (!row || !row.key) return row;
+    const prev = prior.get(row.key);
+    if (!prev) return row;
+    const lv = { ...(row.levels || {}) };
+    const plv = prev.levels || {};
+    const prevEntry = Number(plv.entry != null ? plv.entry : prev.entry);
+    const curEntry = Number(lv.entry != null ? lv.entry : row.entry);
+    if (Number.isFinite(prevEntry) && prevEntry > 0) {
+      lv.entry = Number.isFinite(curEntry) ? r2(Math.max(prevEntry, curEntry)) : r2(prevEntry);
+    }
+    lv.stopLoss = ratchetLongLevel(plv.stopLoss, lv.stopLoss);
+    lv.activeStop = ratchetLongLevel(
+      plv.activeStop != null ? plv.activeStop : plv.stopLoss,
+      lv.activeStop != null ? lv.activeStop : lv.stopLoss
+    );
+    lv.target1 = ratchetLongLevel(plv.target1, lv.target1);
+    lv.target2 = ratchetLongLevel(plv.target2, lv.target2);
+    return {
+      ...row,
+      levels: lv,
+      positionEntry: row.positionEntry != null ? row.positionEntry : prev.positionEntry,
+      filledEntry: row.filledEntry != null ? row.filledEntry : prev.filledEntry,
+      peak: Math.max(Number(row.peak) || 0, Number(prev.peak) || 0) || row.peak || prev.peak,
+    };
+  };
+  const next = { ...book };
+  for (const key of ['core', 'prep', 'liveBuys', 'extrasBuy', 'extrasWatch', 'extrasSkipHot', 'topGainers']) {
+    if (Array.isArray(book[key])) next[key] = book[key].map(mergeRow);
+  }
+  return next;
+}
+
+/** Stamp open bot positions so cards lock SL/T1/T2 to fill entry (trail only raises). */
+function attachOpenPositions(book, positions) {
+  if (!book || !positions) return book;
+  const byKey = new Map();
+  const byTicker = new Map();
+  const list = Array.isArray(positions)
+    ? positions
+    : Object.values(positions);
+  for (const p of list) {
+    if (!p || !(p.qty > 0) || p.status === 'CLOSED') continue;
+    if (p.key) byKey.set(p.key, p);
+    if (p.ticker) byTicker.set(p.ticker, p);
+  }
+  if (!byKey.size && !byTicker.size) return book;
+  const stamp = (row) => {
+    if (!row) return row;
+    const p = (row.key && byKey.get(row.key)) || (row.ticker && byTicker.get(row.ticker));
+    if (!p) return row;
+    const entry = Number(p.entry);
+    if (!(entry > 0)) return row;
+    const initSl = Number(p.initialStop != null ? p.initialStop : p.stop);
+    const curSl = Number(p.stop);
+    const lv = { ...(row.levels || {}) };
+    lv.entry = r2(entry);
+    lv.stopLoss = ratchetLongLevel(lv.stopLoss, initSl);
+    lv.activeStop = ratchetLongLevel(lv.activeStop, Number.isFinite(curSl) ? curSl : initSl);
+    if (Number.isFinite(Number(p.t1))) lv.target1 = ratchetLongLevel(lv.target1, p.t1);
+    if (Number.isFinite(Number(p.t2))) lv.target2 = ratchetLongLevel(lv.target2, p.t2);
+    return {
+      ...row,
+      positionEntry: entry,
+      filledEntry: entry,
+      peak: Math.max(Number(row.peak) || entry, Number(p.peak) || entry, Number(p.last) || entry),
+      levels: lv,
+    };
+  };
+  const next = { ...book };
+  for (const key of ['core', 'prep', 'liveBuys', 'extrasBuy', 'extrasWatch', 'extrasSkipHot', 'topGainers']) {
+    if (Array.isArray(book[key])) next[key] = book[key].map(stamp);
+  }
+  return next;
+}
+
 function applyLiveLtp(row, ltp, phaseInfo, mode) {
   if (!row || !Number.isFinite(ltp) || ltp <= 0) return row;
   const next = { ...row, ltp: r2(ltp), live: true };
   const lv = { ...(row.levels || {}) };
   const trailMode = trailModeOf(mode || row.mode || 'equity');
-  // Signal cards (not a filled bot position): planned entry tracks live LTP.
-  // Otherwise options SL can stick above LTP after premium drops (e.g. LTP 138, SL 155).
   const filled = row.positionEntry != null || row.filledEntry != null;
-  let entryRef = filled
-    ? Number(row.positionEntry != null ? row.positionEntry : row.filledEntry)
-    : ltp;
-  if (!(entryRef > 0)) entryRef = lv.entry != null ? lv.entry : ltp;
-  let stopLoss = lv.stopLoss;
-  if (trailMode === 'options' && !filled) {
+  const prevEntry = Number(lv.entry != null ? lv.entry : row.entry);
+  let entryRef;
+  if (filled) {
+    entryRef = Number(row.positionEntry != null ? row.positionEntry : row.filledEntry);
+  } else if (Number.isFinite(prevEntry) && prevEntry > 0) {
+    // Planned entry never follows LTP down (keeps SL/T1/T2 stable). May rise with LTP.
+    entryRef = Math.max(prevEntry, ltp);
+  } else {
     entryRef = ltp;
-    const forced = optionsInitialStop(ltp, 0.05);
-    stopLoss = forced != null ? forced : r2(ltp * (1 - optionsStopLossPct() / 100));
-    lv.stopLoss = stopLoss;
   }
+  if (!(entryRef > 0)) entryRef = ltp;
+
+  let stopLoss = lv.stopLoss;
+  if (trailMode === 'options') {
+    const forced = optionsInitialStop(entryRef, 0.05);
+    const candidate = forced != null ? forced : r2(entryRef * (1 - optionsStopLossPct() / 100));
+    stopLoss = ratchetLongLevel(stopLoss, candidate);
+  } else if (!Number.isFinite(Number(stopLoss))) {
+    stopLoss = r2(entryRef * 0.992);
+  } else {
+    // Equity: keep candle/plan stop; never lower when LTP drops.
+    stopLoss = ratchetLongLevel(stopLoss, null);
+  }
+  lv.entry = r2(entryRef);
+  lv.stopLoss = stopLoss;
+
+  // Targets: raise with a higher planned entry; never collapse when premium/price falls.
+  if (trailMode === 'options' && !filled) {
+    const tick = 0.05;
+    const round = (n) => Math.round(n / tick) * tick;
+    lv.target1 = ratchetLongLevel(lv.target1, r2(round(entryRef * 1.22)));
+    lv.target2 = ratchetLongLevel(lv.target2, r2(round(entryRef * 1.45)));
+  } else {
+    lv.target1 = ratchetLongLevel(lv.target1, lv.target1);
+    lv.target2 = ratchetLongLevel(lv.target2, lv.target2);
+  }
+
+  const peak = filled
+    ? Math.max(Number(row.peak) || entryRef, Number(lv.peak) || entryRef, ltp)
+    : entryRef;
+  next.peak = peak;
+
   // Preview uses armHoldSec=0 so cards show the lock immediately at the arm price.
-  const trail = trailPlan(entryRef, stopLoss, lv.target1, lv.target2, filled ? ltp : entryRef, {
+  const trail = trailPlan(entryRef, stopLoss, lv.target1, lv.target2, peak, {
     mode: trailMode,
     armHoldSec: 0,
   });
-  Object.assign(lv, trail);
+  const active = ratchetLongLevel(
+    lv.activeStop != null ? lv.activeStop : stopLoss,
+    trail.activeStop
+  );
+  Object.assign(lv, trail, {
+    entry: r2(entryRef),
+    stopLoss,
+    activeStop: active,
+    target1: lv.target1,
+    target2: lv.target2,
+  });
   next.levels = lv;
   if (next.open != null) next.aboveOpen = ltp >= next.open * 0.998;
   next.riskPct = lv.stopLoss != null ? r2(((lv.stopLoss - ltp) / ltp) * 100) : row.riskPct;
@@ -820,24 +959,26 @@ function applyLiveLtp(row, ltp, phaseInfo, mode) {
   return withTradeSignals(next, phaseInfo || sessionPhase());
 }
 
-function patchBookLtps(book, ltpByKey) {
+function patchBookLtps(book, ltpByKey, priorBook = null, positions = null) {
   if (!book || !ltpByKey) return book;
-  const phaseInfo = book.phase || sessionPhase();
-  const mode = trailModeOf(book.mode);
+  let base = priorBook ? inheritLevelLocks(priorBook, book) : book;
+  if (positions) base = attachOpenPositions(base, positions);
+  const phaseInfo = base.phase || sessionPhase();
+  const mode = trailModeOf(base.mode);
   const patchList = (rows) => (rows || []).map((row) => {
     if (!row || !row.key) return row;
     const px = ltpByKey.get(row.key);
     if (!Number.isFinite(px)) return row;
     return applyLiveLtp(row, px, phaseInfo, mode);
   });
-  const next = { ...book };
-  next.core = patchList(book.core);
-  next.prep = patchList(book.prep);
-  next.liveBuys = patchList(book.liveBuys);
-  next.extrasBuy = patchList(book.extrasBuy);
-  next.extrasWatch = patchList(book.extrasWatch);
-  next.extrasSkipHot = patchList(book.extrasSkipHot);
-  next.topGainers = patchList(book.topGainers);
+  const next = { ...base };
+  next.core = patchList(base.core);
+  next.prep = patchList(base.prep);
+  next.liveBuys = patchList(base.liveBuys);
+  next.extrasBuy = patchList(base.extrasBuy);
+  next.extrasWatch = patchList(base.extrasWatch);
+  next.extrasSkipHot = patchList(base.extrasSkipHot);
+  next.topGainers = patchList(base.topGainers);
   next.ltpAt = Date.now();
   return next;
 }
@@ -1205,6 +1346,9 @@ module.exports = {
   withTradeSignals,
   applyLiveLtp,
   patchBookLtps,
+  inheritLevelLocks,
+  attachOpenPositions,
+  ratchetLongLevel,
   allInstrumentKeys,
   scoreRow,
   screenOne,

@@ -293,6 +293,79 @@ test('applyLiveLtp marks LIVE and refreshes ENTRY BUY SELL', () => {
   assert.ok(row.sellT1);
 });
 
+test('applyLiveLtp options: SL never drops when premium falls', () => {
+  const phase = sessionPhase(istToEpoch('2026-11-10', 10, 0), 'regular');
+  let row = {
+    ticker: 'NIFTY 23550 CE',
+    key: 'NSE_FO|1',
+    mode: 'options',
+    verdict: 'BUY',
+    ltp: 100,
+    levels: {
+      entry: 100,
+      stopLoss: 90,
+      activeStop: 90,
+      target1: 115,
+      target2: 120,
+    },
+  };
+  row = withTradeSignals(row, phase);
+  assert.equal(row.sellStop, 90);
+  row = applyLiveLtp(row, 90, phase, 'options');
+  assert.equal(row.ltp, 90);
+  assert.ok(row.sellStop >= 90, `SL must not fall below 90, got ${row.sellStop}`);
+  assert.ok(row.levels.stopLoss >= 90);
+  assert.ok(row.sellT1 >= 115);
+  assert.ok(row.sellT2 >= 120);
+});
+
+test('applyLiveLtp equity: SL never drops when LTP falls', () => {
+  const phase = sessionPhase(istToEpoch('2026-11-10', 10, 0), 'regular');
+  let row = {
+    ticker: 'SBIN',
+    key: 'NSE_EQ|INE062A01020',
+    mode: 'equity',
+    verdict: 'BUY',
+    ltp: 1000,
+    levels: {
+      entry: 1000,
+      stopLoss: 990,
+      activeStop: 990,
+      target1: 1015,
+      target2: 1025,
+    },
+  };
+  row = applyLiveLtp(row, 980, phase, 'equity');
+  assert.equal(row.ltp, 980);
+  assert.ok(row.sellStop >= 990, `SL must stay ≥ 990, got ${row.sellStop}`);
+  assert.ok(row.levels.stopLoss >= 990);
+});
+
+test('applyLiveLtp filled position trails SL up only', () => {
+  const phase = sessionPhase(istToEpoch('2026-11-10', 10, 0), 'regular');
+  let row = {
+    ticker: 'NIFTY 23550 CE',
+    key: 'NSE_FO|1',
+    mode: 'options',
+    verdict: 'BUY',
+    ltp: 100,
+    positionEntry: 100,
+    filledEntry: 100,
+    levels: {
+      entry: 100,
+      stopLoss: 95,
+      activeStop: 95,
+      target1: 122,
+      target2: 145,
+    },
+  };
+  row = applyLiveLtp(row, 112, phase, 'options');
+  assert.ok(row.sellStop >= 95);
+  const raised = row.sellStop;
+  row = applyLiveLtp(row, 104, phase, 'options');
+  assert.ok(row.sellStop >= raised, 'pullback must not lower SL');
+});
+
 test('render before open shows watchlist not trade plan', () => {
   const text = render({
     book: {
@@ -334,12 +407,12 @@ test('render before open shows watchlist not trade plan', () => {
     updatedAt: '08 Nov 13:05 IST',
     feed: 'live',
   }, { width: 110, height: 40, fill: false }).replace(/\x1b\[[0-9;]*m/g, '');
-  assert.match(text, /Watchlist — P > 12/);
+  assert.match(text, /Watch — no BUY call yet/);
   assert.match(text, /no BUY decision/i);
   assert.match(text, /SBIN/);
-  assert.match(text, /ENTRY/);
-  assert.match(text, /BUY/);
-  assert.match(text, /SELL/);
+  assert.match(text, /LTP/);
+  assert.match(text, /SL/);
+  assert.match(text, /T1/);
   assert.match(text, /FEED LIVE/);
   assert.doesNotMatch(text, /Live BUY now/);
 });
@@ -388,7 +461,7 @@ test('render shows Top Gainers with P score', () => {
     updatedAt: '08 Nov 14:45 IST',
     feed: 'live',
   }, { width: 110, height: 50, fill: false }).replace(/\x1b\[[0-9;]*m/g, '');
-  assert.match(text, /Top Gainers — P > 12/);
+  assert.match(text, /Top Gainers/);
   assert.match(text, /SIEMENS/);
   assert.match(text, /P15\.94|P15/);
   assert.doesNotMatch(text, /WEAKGAIN/);
@@ -429,15 +502,16 @@ test('gainer already in Live BUY or Watchlist is flagged there, not repeated in 
   }, { width: 120, height: 80, fill: false }).replace(/\x1b\[[0-9;]*m/g, '');
 
   assert.match(text, /Live BUY/);
-  assert.match(text, /Watchlist — P > 12/);
-  assert.match(text, /GAINER/);
+  assert.match(text, /\bWatch\b/);
+  const liveSection = text.slice(text.indexOf('Live BUY'), text.indexOf('Watch'));
   // Highest P Live BUY first: NTPC (18.5) before TATASTEEL (14.2)
-  assert.ok(text.indexOf('NTPC') < text.indexOf('TATASTEEL'));
+  assert.ok(liveSection.indexOf('NTPC') < liveSection.indexOf('TATASTEEL'));
   // Watchlist: SIEMENS (15.9) before BEL (13.2); LOWP (P 9.1) hidden
-  assert.ok(text.indexOf('SIEMENS') < text.indexOf('BEL'));
+  const watchSection = text.slice(text.indexOf('Watch'), text.indexOf('Top Gainers'));
+  assert.ok(watchSection.indexOf('SIEMENS') < watchSection.indexOf('BEL'));
   assert.doesNotMatch(text, /LOWP/);
   assert.doesNotMatch(text, /WEAKGAIN/);
-  // Overlap stays in Live/Watch with flag; only ASHOKLEY remains under Top Gainers
+  // Overlap stays in Live/Watch; only ASHOKLEY remains under Top Gainers
   const gainerSection = text.slice(text.indexOf('Top Gainers'));
   assert.match(gainerSection, /ASHOKLEY/);
   assert.doesNotMatch(gainerSection, /TATASTEEL/);

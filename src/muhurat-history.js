@@ -75,6 +75,17 @@ function loadDay(day) {
   };
 }
 
+/** Count ledger trades for a mode (survives bot state wipe / restart). */
+function countTradesForDay(day, mode = 'equity') {
+  const doc = loadDay(day);
+  const want = mode === 'options' ? 'options' : 'equity';
+  return (doc.trades || []).filter((t) => {
+    if (!t || !t.ticker) return false;
+    const m = t.mode === 'options' ? 'options' : 'equity';
+    return m === want;
+  }).length;
+}
+
 function saveDay(doc) {
   if (!doc || !doc.date) return;
   doc.updatedAt = new Date().toISOString();
@@ -424,6 +435,7 @@ module.exports = {
   appendLog,
   readLogs,
   loadDay,
+  countTradesForDay,
   listDays,
   dayDetail,
   recordBuy,

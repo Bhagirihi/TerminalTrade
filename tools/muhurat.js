@@ -10,6 +10,7 @@ const { buildMuhuratBook, SESSION, patchBookLtps, allInstrumentKeys, maxTradesPe
 const { buildMuhuratOptionsBook } = require('../src/muhurat-options');
 const { runMuhuratChecks, formatChecks } = require('../src/muhurat-checks');
 const { createMuhuratBot, portfolioLossGate } = require('../src/muhurat-bot');
+const { collectUserSignals, formatSignal } = require('../src/muhurat-signals');
 const { askBuyApproval } = require('../src/muhurat-approve');
 const { openTerminal } = require('../src/terminal');
 const { UpstoxFeed } = require('../src/data/upstox-feed');
@@ -346,60 +347,16 @@ function section(title, rows, width) {
 /** Manual cues when auto orders fail (static IP / 403) or for watch-only. */
 function userSignalLines(book, bot, phase, width) {
   const lines = [];
-  const phaseInfo = (book && book.phase) || phase || {};
-  const lossGate = (bot && bot.lossGate) || (book && book.lossGate);
-  const buyBlocked = lossGate && lossGate.blocked;
-
-  const buys = [];
-  const seenBuy = new Set();
-  if (!buyBlocked && phaseInfo.canDecideBuy !== false) {
-    for (const r of (book && book.liveBuys) || []) {
-      if (!r || !r.ticker) continue;
-      if (r.verdict !== 'BUY') continue;
-      if (!(Number(r.profitScore) > 12)) continue;
-      if (!(r.qty > 0)) continue;
-      if (r.orderReady === false) continue;
-      if (seenBuy.has(r.ticker)) continue;
-      seenBuy.add(r.ticker);
-      buys.push(r.ticker);
-    }
-  }
-
-  const sells = [];
-  const seenSell = new Set();
-  const pushSell = (ticker) => {
-    if (!ticker || seenSell.has(ticker)) return;
-    seenSell.add(ticker);
-    sells.push(ticker);
-  };
-  const exitOnly = phaseInfo.phase === 'exit_only' || phaseInfo.phase === 'closed';
-  for (const p of (bot && bot.positions) || []) {
-    if (!p || !p.ticker || !(p.qty > 0)) continue;
-    const last = Number(p.last);
-    const stop = Number(p.stop);
-    const t2 = Number(p.t2);
-    if (exitOnly) pushSell(p.ticker);
-    else if (Number.isFinite(last) && Number.isFinite(stop) && last <= stop) pushSell(p.ticker);
-    else if (Number.isFinite(last) && Number.isFinite(t2) && last >= t2) pushSell(p.ticker);
-  }
-  // If auto BUY failed (IP / 403), still surface the name from recent bot errors/logs.
-  if (!buyBlocked) {
-    const err = String((bot && bot.lastError) || '');
-    const m = err.match(/^BUY\s+([A-Z0-9 .&-]+)\s*:/i);
-    if (m && m[1] && !seenBuy.has(m[1].trim())) {
-      const t = m[1].trim();
-      seenBuy.add(t);
-      buys.unshift(t);
-    }
-  }
-
+  const sig = collectUserSignals(book, bot);
+  const buys = (sig && sig.buys) || [];
+  const sells = (sig && sig.sells) || [];
   if (!buys.length && !sells.length) return lines;
   lines.push(clip(bold('── USER SIGNALS ──') + dim('  place in Upstox app if auto blocked'), width));
-  for (const t of buys.slice(0, 8)) {
-    lines.push(clip(green(bold(`  BUY(USER)  ==>  ${t}`)), width));
+  for (const s of buys) {
+    lines.push(clip(green(bold(`  BUY(USER)  ==>  ${formatSignal(s)}`)), width));
   }
-  for (const t of sells.slice(0, 8)) {
-    lines.push(clip(red(bold(`  SELL(USER) ==>  ${t}`)), width));
+  for (const s of sells) {
+    lines.push(clip(red(bold(`  SELL(USER) ==>  ${formatSignal(s)}`)), width));
   }
   lines.push('');
   return lines;
@@ -907,6 +864,7 @@ async function live(opts = {}) {
     bot = createMuhuratBot(provider, {
       mode,
       budget: mode === 'options' ? optionsBudget : stockBudget,
+      enforceBudget: true,
     });
   }
   state.bot = bot ? bot.snapshot() : null;
@@ -965,10 +923,20 @@ async function live(opts = {}) {
     if (tickTimer) return;
     tickTimer = setTimeout(() => {
       tickTimer = null;
-      state.book = patchBookLtps(state.book, ltpByKey);
+      state.book = patchBookLtps(
+        state.book,
+        ltpByKey,
+        state.book,
+        state.bot && state.bot.positions
+      );
       repriceBookPortfolio(state.book, ltpByKey);
       if (state.optionsBook) {
-        state.optionsBook = patchBookLtps(state.optionsBook, ltpByKey);
+        state.optionsBook = patchBookLtps(
+          state.optionsBook,
+          ltpByKey,
+          state.optionsBook,
+          state.optionsBot && state.optionsBot.positions
+        );
         repriceBookPortfolio(state.optionsBook, ltpByKey);
       }
       state.updatedAt = istFullStr(Date.now());
@@ -1021,8 +989,13 @@ async function live(opts = {}) {
         syncPortfolioKeys(optionsBook, feed);
         repriceBookPortfolio(book, ltpByKey);
         repriceBookPortfolio(optionsBook, ltpByKey);
-        state.book = patchBookLtps(book, ltpByKey);
-        state.optionsBook = patchBookLtps(optionsBook, ltpByKey);
+        state.book = patchBookLtps(book, ltpByKey, state.book, state.bot && state.bot.positions);
+        state.optionsBook = patchBookLtps(
+          optionsBook,
+          ltpByKey,
+          state.optionsBook,
+          state.optionsBot && state.optionsBot.positions
+        );
         if (bot) state.bot = await bot.tick(state.book, ltpByKey);
         if (optionsBot) state.optionsBot = await optionsBot.tick(state.optionsBook, ltpByKey);
       } else {
@@ -1036,7 +1009,7 @@ async function live(opts = {}) {
         });
         syncPortfolioKeys(book, feed);
         repriceBookPortfolio(book, ltpByKey);
-        state.book = patchBookLtps(book, ltpByKey);
+        state.book = patchBookLtps(book, ltpByKey, state.book, state.bot && state.bot.positions);
         if (bot) state.bot = await bot.tick(state.book, ltpByKey);
       }
       state.updatedAt = istFullStr(Date.now());
