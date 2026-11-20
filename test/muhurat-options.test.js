@@ -8,6 +8,7 @@ const {
   premiumLevels,
   scoreOptionSide,
   analyzeIndex,
+  detectIndexTrain,
   allocateOptionsBudget,
 } = require('../src/muhurat-options');
 const { isOptionsArg, render } = require('../tools/muhurat');
@@ -35,6 +36,100 @@ test('analyzeIndex returns CE/PE bias from trend', () => {
   const row = analyzeIndex({ id: 'NIFTY', lotSize: 65, strikeStep: 50 }, candles, px);
   assert.equal(row.bias, 'CE');
   assert.ok(row.score > 0);
+});
+
+function synth15m(startPx, n, step, vol = 1000) {
+  const bars = [];
+  let px = startPx;
+  const day0 = Date.parse('2026-11-19T09:15:00+05:30');
+  for (let i = 0; i < n; i++) {
+    const open = px;
+    const close = px + step;
+    const high = Math.max(open, close) + Math.abs(step) * 0.4;
+    const low = Math.min(open, close) - Math.abs(step) * 0.3;
+    bars.push({
+      t: day0 + i * 15 * 60 * 1000,
+      open,
+      high,
+      low,
+      close,
+      volume: vol + (i % 3) * 50,
+    });
+    px = close;
+  }
+  return bars;
+}
+
+test('detectIndexTrain flags CE on breakout + indicator confirms', () => {
+  // Build a rising 15m series so ST/EMA/ADX/VWAP can seed, then break out.
+  const bars = synth15m(24800, 40, 12, 1200);
+  const last = bars[bars.length - 1];
+  // Spike breakout with heavy volume
+  const px = last.close;
+  bars.push({
+    t: last.t + 15 * 60 * 1000,
+    open: px,
+    high: px + 180,
+    low: px - 10,
+    close: px + 150,
+    volume: 8000,
+  });
+  const t = detectIndexTrain(bars, px + 150);
+  assert.equal(t.train, 'CE');
+  assert.ok(t.confirms.length >= 2);
+  assert.ok(t.indicators);
+  assert.ok(t.indicators.ema9 > t.indicators.ema21);
+});
+
+test('detectIndexTrain flags PE on breakdown + indicator confirms', () => {
+  const bars = synth15m(25200, 40, -12, 1200);
+  const last = bars[bars.length - 1];
+  const px = last.close;
+  bars.push({
+    t: last.t + 15 * 60 * 1000,
+    open: px,
+    high: px + 10,
+    low: px - 180,
+    close: px - 150,
+    volume: 8000,
+  });
+  const t = detectIndexTrain(bars, px - 150);
+  assert.equal(t.train, 'PE');
+  assert.ok(t.confirms.length >= 2);
+});
+
+test('detectIndexTrain waits for enough 15m history to seed indicators', () => {
+  const bars = synth15m(25000, 12, 40, 5000);
+  const t = detectIndexTrain(bars, bars[bars.length - 1].close);
+  assert.equal(t.train, null);
+  assert.match(t.trainReason, /need/);
+});
+
+test('analyzeIndex forces CE bias when train is CE', () => {
+  const candles = [];
+  let px = 24500;
+  for (let i = 0; i < 60; i++) {
+    px -= 20;
+    candles.push({ open: px + 10, high: px + 20, low: px - 20, close: px });
+  }
+  const row = analyzeIndex(
+    { id: 'NIFTY', lotSize: 65, strikeStep: 50 },
+    candles,
+    px,
+    { train: 'CE', trainReason: '15m breakout', trainLevel: 25000 }
+  );
+  assert.equal(row.bias, 'CE');
+  assert.equal(row.train, 'CE');
+  assert.ok(row.reasons.some((r) => /TRAIN/.test(r)));
+});
+
+test('scoreOptionSide boosts TRAIN side and penalizes against', () => {
+  const base = { score: 8, reasons: [], bias: 'CE', aboveSma: true, rsi: 55, train: 'CE' };
+  const ce = scoreOptionSide(base, 'CE');
+  const pe = scoreOptionSide(base, 'PE');
+  assert.ok(ce.score > pe.score);
+  assert.ok(ce.reasons.some((r) => /TRAIN CE/.test(r)));
+  assert.ok(pe.reasons.some((r) => /against TRAIN/.test(r)));
 });
 
 test('allocateOptionsBudget sizes in lots', () => {
@@ -138,7 +233,7 @@ test('render options mode title', () => {
       screened: 4,
       phase: { phase: 'closed', canDecideBuy: false, clock: '19:40', message: 'Session closed.' },
       budget: { budget: 20000, used: 0, left: 20000, pickCount: 0 },
-      indexes: [{ indexId: 'NIFTY', indexLtp: 24986, bias: 'CE' }],
+      indexes: [{ indexId: 'NIFTY', indexLtp: 24986, bias: 'CE', train: 'CE' }],
       core: [{
         ticker: 'NIFTY 25000 CE',
         right: 'CE',
@@ -172,5 +267,6 @@ test('render options mode title', () => {
   }, { width: 110, height: 40, fill: false }).replace(/\x1b\[[0-9;]*m/g, '');
   assert.match(text, /Muhurat Options/);
   assert.match(text, /NIFTY 25000 CE/);
+  assert.match(text, /TRAIN→CE/);
   assert.doesNotMatch(text, /Top Gainers/);
 });

@@ -224,6 +224,32 @@ class UpstoxProvider {
     return this.parseCandles(j);
   }
 
+  // Minute candles across a date range (YYYY-MM-DD), oldest first.
+  // When toDate is today, merges the intraday endpoint for the freshest bars.
+  async getMinuteCandles(instrumentKey, fromDate, toDate, intervalMinutes = 15, { isToday = false } = {}) {
+    const key = encodeURIComponent(instrumentKey);
+    const byT = new Map();
+    try {
+      const j = await this.fetchJson(
+        `${BASE}/v3/historical-candle/${key}/minutes/${intervalMinutes}/${toDate}/${fromDate}`
+      );
+      for (const c of this.parseCandles(j)) byT.set(c.t, c);
+    } catch (_) {
+      /* try intraday below */
+    }
+    if (isToday) {
+      try {
+        const j = await this.fetchJson(
+          `${BASE}/v3/historical-candle/intraday/${key}/minutes/${intervalMinutes}`
+        );
+        for (const c of this.parseCandles(j)) byT.set(c.t, c);
+      } catch (_) {
+        /* keep historical */
+      }
+    }
+    return [...byT.values()].sort((a, b) => a.t - b.t);
+  }
+
   async getOptionContracts(instrumentKey) {
     const j = await this.fetchJson(`${BASE}/v2/option/contract?instrument_key=${encodeURIComponent(instrumentKey)}`);
     return (j && j.data) || [];

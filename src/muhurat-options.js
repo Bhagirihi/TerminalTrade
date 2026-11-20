@@ -6,6 +6,8 @@
 const { SYMBOLS } = require('./config');
 const { nearestListedStrike, nearestStepStrike } = require('./strikes');
 const { istDateKey } = require('./time');
+const { emaSeries, vwapSeries, dmiSeries } = require('./indicators');
+const { supertrendSeries } = require('./supertrend');
 const {
   SESSION,
   DEFAULT_BUDGET,
@@ -89,7 +91,220 @@ async function loadOptionBook(provider, symbol, today) {
   return { expiry, strikes, instruments, lotByKey, metaByKey, chainLtp };
 }
 
-function analyzeIndex(symbol, candles, ltp) {
+/** 15m momentum "train" — breakout trigger + TV indicator confirmation. */
+function trainEnabled() {
+  const v = String(process.env.MUHURAT_OPT_TRAIN || 'true').trim().toLowerCase();
+  return !(v === '0' || v === 'false' || v === 'no' || v === 'off');
+}
+
+function optionsTrainStopPct() {
+  const n = Number(process.env.MUHURAT_OPT_TRAIN_SL_PCT);
+  return Number.isFinite(n) && n > 0 ? n : 8;
+}
+
+function trainMinConfirms() {
+  const n = Number(process.env.MUHURAT_OPT_TRAIN_MIN_CONFIRM);
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 2;
+}
+
+function trainAdxFloor() {
+  const n = Number(process.env.MUHURAT_OPT_TRAIN_ADX);
+  return Number.isFinite(n) && n > 0 ? n : 20;
+}
+
+function volumeSma(volumes, length) {
+  const out = new Array(volumes.length).fill(NaN);
+  for (let i = length - 1; i < volumes.length; i++) {
+    let s = 0;
+    for (let k = i - length + 1; k <= i; k++) s += volumes[k];
+    out[i] = s / length;
+  }
+  return out;
+}
+
+function shiftIstDateKey(dayKey, deltaDays) {
+  const base = Date.parse(`${dayKey}T12:00:00+05:30`);
+  if (!Number.isFinite(base)) return dayKey;
+  return istDateKey(base + deltaDays * 86400000);
+}
+
+/** Load ~1 week of 15m bars so ST/EMA/ADX/VWAP can seed. */
+async function loadIndex15mBars(provider, symbol, dayKey) {
+  const from = shiftIstDateKey(dayKey, -10);
+  if (typeof provider.getMinuteCandles === 'function') {
+    try {
+      const rows = await provider.getMinuteCandles(symbol.upstoxKey, from, dayKey, 15, {
+        isToday: true,
+      });
+      if (rows && rows.length) return rows;
+    } catch (_) {
+      /* fall through */
+    }
+  }
+  if (typeof provider.getCandlesForDate !== 'function') return [];
+  try {
+    return (await provider.getCandlesForDate({ upstoxKey: symbol.upstoxKey }, dayKey, 15, true)) || [];
+  } catch (_) {
+    return [];
+  }
+}
+
+/**
+ * Detect bullish/bearish train on 15m bars.
+ * Trigger = price-action breakout (don't wait for every indicator).
+ * Confirm = Supertrend(10,3) · EMA9/21 · ADX(14) · VWAP · Volume SMA(20).
+ * Need ≥2 confirms (env MUHURAT_OPT_TRAIN_MIN_CONFIRM); ride with ≥3 if no fresh breakout.
+ */
+function detectIndexTrain(candles15m, ltp) {
+  const empty = {
+    train: null,
+    trainReason: '',
+    trainLevel: null,
+    bars: 0,
+    confirms: [],
+    indicators: null,
+  };
+  if (!trainEnabled()) return empty;
+  if (!candles15m || candles15m.length < 30) {
+    return {
+      ...empty,
+      trainReason: 'need ~30×15m bars',
+      bars: candles15m ? candles15m.length : 0,
+    };
+  }
+
+  const candles = candles15m;
+  const i = candles.length - 1;
+  const c = candles[i];
+  const closes = candles.map((x) => Number(x.close));
+  const volumes = candles.map((x) => (Number.isFinite(Number(x.volume)) ? Number(x.volume) : 0));
+  const price = Number.isFinite(Number(ltp)) ? Number(ltp) : Number(c.close);
+
+  const ema9 = emaSeries(closes, 9);
+  const ema21 = emaSeries(closes, 21);
+  const st = supertrendSeries(candles, 10, 3.0);
+  const dmi = dmiSeries(candles, 14, 14);
+  const vwap = vwapSeries(candles);
+  const volSma20 = volumeSma(volumes, 20);
+
+  const prior = candles.slice(Math.max(0, i - 12), Math.max(1, i - 1));
+  const swingHigh = Math.max(...prior.map((x) => Number(x.high)).filter(Number.isFinite));
+  const swingLow = Math.min(...prior.map((x) => Number(x.low)).filter(Number.isFinite));
+  const brokeUp = Number.isFinite(swingHigh) && (price > swingHigh || Number(c.close) > swingHigh);
+  const brokeDown = Number.isFinite(swingLow) && (price < swingLow || Number(c.close) < swingLow);
+
+  const stGreen = st.direction[i] === -1;
+  const stRed = st.direction[i] === 1;
+  const emaBull = Number.isFinite(ema9[i]) && Number.isFinite(ema21[i]) && ema9[i] > ema21[i];
+  const emaBear = Number.isFinite(ema9[i]) && Number.isFinite(ema21[i]) && ema9[i] < ema21[i];
+  const emaCrossUp = emaBull && i > 0 && Number.isFinite(ema9[i - 1]) && Number.isFinite(ema21[i - 1])
+    && ema9[i - 1] <= ema21[i - 1];
+  const emaCrossDn = emaBear && i > 0 && Number.isFinite(ema9[i - 1]) && Number.isFinite(ema21[i - 1])
+    && ema9[i - 1] >= ema21[i - 1];
+  const aboveEmas = Number.isFinite(ema9[i]) && Number.isFinite(ema21[i])
+    && price > ema9[i] && price > ema21[i];
+  const belowEmas = Number.isFinite(ema9[i]) && Number.isFinite(ema21[i])
+    && price < ema9[i] && price < ema21[i];
+  const adxFloor = trainAdxFloor();
+  const adxBull = Number.isFinite(dmi.adx[i]) && dmi.adx[i] >= adxFloor
+    && Number.isFinite(dmi.plus[i]) && Number.isFinite(dmi.minus[i]) && dmi.plus[i] > dmi.minus[i];
+  const adxBear = Number.isFinite(dmi.adx[i]) && dmi.adx[i] >= adxFloor
+    && Number.isFinite(dmi.plus[i]) && Number.isFinite(dmi.minus[i]) && dmi.minus[i] > dmi.plus[i];
+  const aboveVwap = Number.isFinite(vwap[i]) && price > vwap[i];
+  const belowVwap = Number.isFinite(vwap[i]) && price < vwap[i];
+  const volUp = Number.isFinite(volSma20[i]) && volSma20[i] > 0 && volumes[i] > volSma20[i];
+
+  const bullConfirms = [];
+  if (stGreen) bullConfirms.push('ST green');
+  if (emaBull) bullConfirms.push(emaCrossUp ? 'EMA9×21↑' : 'EMA9>21');
+  if (aboveEmas) bullConfirms.push('above EMAs');
+  if (adxBull) bullConfirms.push(`ADX ${r2(dmi.adx[i])}+DI`);
+  if (aboveVwap) bullConfirms.push('>VWAP');
+  if (volUp && (brokeUp || emaCrossUp)) bullConfirms.push('vol>SMA20');
+
+  const bearConfirms = [];
+  if (stRed) bearConfirms.push('ST red');
+  if (emaBear) bearConfirms.push(emaCrossDn ? 'EMA9×21↓' : 'EMA9<21');
+  if (belowEmas) bearConfirms.push('below EMAs');
+  if (adxBear) bearConfirms.push(`ADX ${r2(dmi.adx[i])}-DI`);
+  if (belowVwap) bearConfirms.push('<VWAP');
+  if (volUp && (brokeDown || emaCrossDn)) bearConfirms.push('vol>SMA20');
+
+  const indicators = {
+    st: stGreen ? 'green' : (stRed ? 'red' : null),
+    stValue: r2(st.value[i]),
+    ema9: r2(ema9[i]),
+    ema21: r2(ema21[i]),
+    adx: r2(dmi.adx[i]),
+    plusDI: r2(dmi.plus[i]),
+    minusDI: r2(dmi.minus[i]),
+    vwap: r2(vwap[i]),
+    volSma20: r2(volSma20[i]),
+    volume: volumes[i],
+  };
+
+  const minC = trainMinConfirms();
+  const base = {
+    bars: candles.length,
+    indicators,
+    trainLevel: null,
+    confirms: [],
+  };
+
+  // Trigger = breakout (+ optional fresh EMA cross). Confirms filter late/weak moves.
+  if ((brokeUp || emaCrossUp) && bullConfirms.length >= minC) {
+    return {
+      ...base,
+      train: 'CE',
+      trainReason: brokeUp
+        ? `breakout > ${r2(swingHigh)} + ${bullConfirms.join(', ')}`
+        : `EMA cross + ${bullConfirms.join(', ')}`,
+      trainLevel: r2(swingHigh),
+      confirms: bullConfirms,
+    };
+  }
+  if ((brokeDown || emaCrossDn) && bearConfirms.length >= minC) {
+    return {
+      ...base,
+      train: 'PE',
+      trainReason: brokeDown
+        ? `breakdown < ${r2(swingLow)} + ${bearConfirms.join(', ')}`
+        : `EMA cross + ${bearConfirms.join(', ')}`,
+      trainLevel: r2(swingLow),
+      confirms: bearConfirms,
+    };
+  }
+  // Ride an established train without waiting for a new breakout every bar.
+  if (bullConfirms.length >= minC + 1 && stGreen && emaBull && aboveVwap) {
+    return {
+      ...base,
+      train: 'CE',
+      trainReason: `ride ${bullConfirms.join(', ')}`,
+      trainLevel: r2(swingHigh),
+      confirms: bullConfirms,
+    };
+  }
+  if (bearConfirms.length >= minC + 1 && stRed && emaBear && belowVwap) {
+    return {
+      ...base,
+      train: 'PE',
+      trainReason: `ride ${bearConfirms.join(', ')}`,
+      trainLevel: r2(swingLow),
+      confirms: bearConfirms,
+    };
+  }
+
+  return {
+    ...base,
+    train: null,
+    trainReason: brokeUp
+      ? `breakout weak (${bullConfirms.length}/${minC})`
+      : (brokeDown ? `breakdown weak (${bearConfirms.length}/${minC})` : ''),
+    confirms: brokeUp ? bullConfirms : (brokeDown ? bearConfirms : []),
+  };
+}
+
+function analyzeIndex(symbol, candles, ltp, trainInfo = null) {
   const closes = candles.map((c) => c.close);
   const last = closes[closes.length - 1];
   const price = Number.isFinite(ltp) ? ltp : last;
@@ -112,11 +327,23 @@ function analyzeIndex(symbol, candles, ltp) {
     ticker: symbol.id,
   });
   // Index options are always liquid — mirror MEGA bump without faking an equity ticker.
-  const score = scored.score + 2;
+  let score = scored.score + 2;
   const reasons = [...scored.reasons, 'index liquidity'];
   let bias = 'NEUTRAL';
   if (aboveSma && (d1 == null || d1 >= -0.3) && rsi != null && rsi >= 48) bias = 'CE';
   else if (!aboveSma || (d1 != null && d1 <= -0.4) || (rsi != null && rsi < 45)) bias = 'PE';
+
+  const train = trainInfo && trainInfo.train ? trainInfo : null;
+  if (train && train.train === 'CE') {
+    bias = 'CE';
+    score += 4;
+    reasons.push(`TRAIN ${train.trainReason || '15m up'}`);
+  } else if (train && train.train === 'PE') {
+    bias = 'PE';
+    score += 4;
+    reasons.push(`TRAIN ${train.trainReason || '15m down'}`);
+  }
+
   return {
     indexId: symbol.id,
     indexLtp: r2(price),
@@ -127,6 +354,11 @@ function analyzeIndex(symbol, candles, ltp) {
     atrPct: r2(atrPct),
     distSma: r2(distSma),
     aboveSma,
+    train: train ? train.train : null,
+    trainReason: trainInfo ? (trainInfo.trainReason || '') : '',
+    trainLevel: trainInfo ? trainInfo.trainLevel : null,
+    trainConfirms: trainInfo && Array.isArray(trainInfo.confirms) ? trainInfo.confirms : [],
+    trainIndicators: trainInfo ? trainInfo.indicators : null,
     score,
     reasons,
     bias,
@@ -168,9 +400,23 @@ function scoreOptionSide(indexAnalyzed, right) {
     score -= 3;
     reasons.push(`against ${indexAnalyzed.bias} bias`);
   }
+  if (indexAnalyzed.train === right) {
+    score += 5;
+    reasons.push(`TRAIN ${right}`);
+  } else if (indexAnalyzed.train && indexAnalyzed.train !== right) {
+    score -= 8;
+    reasons.push(`against TRAIN ${indexAnalyzed.train}`);
+  }
   if (right === 'CE' && indexAnalyzed.aboveSma) score += 1;
   if (right === 'PE' && indexAnalyzed.aboveSma === false) score += 1;
   return { score, reasons };
+}
+
+function stopAtPct(entry, tick, pct) {
+  const e = Number(entry);
+  if (!(e > 0) || !(pct > 0)) return null;
+  const step = Number(tick) > 0 ? Number(tick) : 0.05;
+  return Math.round((e * (1 - pct / 100)) / step) * step;
 }
 
 function buildOptionRow({
@@ -188,11 +434,17 @@ function buildOptionRow({
   openPx,
 }) {
   const sideScore = scoreOptionSide(indexAnalyzed, right);
+  const onTrain = indexAnalyzed.train === right;
+  const againstTrain = !!(indexAnalyzed.train && indexAnalyzed.train !== right);
+  const tick = tickSize || 0.05;
   let levels = null;
   if (optCandles && optCandles.length >= 15) {
     levels = levelsFromCandles(optCandles, premium, 'options');
     // Force options hard SL at −5% of premium (ignore wider/tighter candle stop).
-    const forcedStop = optionsInitialStop(premium, tickSize || 0.05);
+    // On 15m TRAIN matching side, give more room (−8% default).
+    const forcedStop = onTrain
+      ? stopAtPct(premium, tick, optionsTrainStopPct())
+      : optionsInitialStop(premium, tick);
     if (forcedStop != null) levels.stopLoss = r2(forcedStop);
     const trail = trailPlan(premium, levels.stopLoss, levels.target1, levels.target2, premium, {
       mode: 'options',
@@ -200,7 +452,18 @@ function buildOptionRow({
     });
     Object.assign(levels, trail);
   } else {
-    levels = premiumLevels(premium, tickSize || 0.05);
+    levels = premiumLevels(premium, tick);
+    if (onTrain && levels) {
+      const wider = stopAtPct(premium, tick, optionsTrainStopPct());
+      if (wider != null) {
+        levels.stopLoss = r2(wider);
+        const trail = trailPlan(premium, levels.stopLoss, levels.target1, levels.target2, premium, {
+          mode: 'options',
+          armHoldSec: 0,
+        });
+        Object.assign(levels, trail);
+      }
+    }
   }
   if (!levels) {
     return applySessionVerdict({
@@ -218,10 +481,21 @@ function buildOptionRow({
     }, phaseInfo, null);
   }
 
+  // Ride the 15m train: matching CE/PE gets easier BUY + never TOO HOT;
+  // opposite side is blocked.
   let verdict = 'SKIP';
-  if (sideScore.score >= 8 && indexAnalyzed.rsi != null && indexAnalyzed.rsi <= 72) verdict = 'BUY';
-  else if (sideScore.score >= 5) verdict = 'WATCH';
-  else if (indexAnalyzed.rsi != null && indexAnalyzed.rsi > 75 && right === 'CE') verdict = 'TOO HOT';
+  if (againstTrain) {
+    verdict = 'SKIP';
+  } else if (onTrain) {
+    if (sideScore.score >= 6) verdict = 'BUY';
+    else if (sideScore.score >= 4) verdict = 'WATCH';
+  } else if (sideScore.score >= 8 && indexAnalyzed.rsi != null && indexAnalyzed.rsi <= 72) {
+    verdict = 'BUY';
+  } else if (sideScore.score >= 5) {
+    verdict = 'WATCH';
+  } else if (indexAnalyzed.rsi != null && indexAnalyzed.rsi > 75 && right === 'CE') {
+    verdict = 'TOO HOT';
+  }
 
   const row = {
     ticker: `${symbol.id} ${strike} ${right}`,
@@ -244,6 +518,8 @@ function buildOptionRow({
     distSma: indexAnalyzed.distSma,
     aboveSma: indexAnalyzed.aboveSma,
     bias: indexAnalyzed.bias,
+    train: indexAnalyzed.train || null,
+    trainReason: indexAnalyzed.trainReason || '',
     score: sideScore.score,
     reasons: sideScore.reasons,
     verdict,
@@ -396,7 +672,16 @@ async function buildMuhuratOptionsBook(provider, {
       continue;
     }
     const indexLtp = indexLtpMap.get(symbol.upstoxKey);
-    const indexAnalyzed = analyzeIndex(symbol, candles, indexLtp);
+    let trainInfo = null;
+    if (phaseInfo.phase !== 'before_open') {
+      try {
+        const c15 = await loadIndex15mBars(provider, symbol, phaseInfo.day);
+        trainInfo = detectIndexTrain(c15, indexLtp);
+      } catch (_) {
+        trainInfo = null;
+      }
+    }
+    const indexAnalyzed = analyzeIndex(symbol, candles, indexLtp, trainInfo);
     indexes.push(indexAnalyzed);
 
     let book;
@@ -532,14 +817,17 @@ async function buildMuhuratOptionsBook(provider, {
     budget: budgetPlan,
     rules: {
       budget: planBudget,
-      pickRule: `Options Live BUY CE / BUY PE only (never sell-to-open) · ATM · P > 12 · lots · max ${maxTradesPerDay('options') || '∞'}/day.`,
+      pickRule: `Options Live BUY CE / BUY PE only (never sell-to-open) · ATM · P > 12 · lots · 15m TRAIN rides matching side (no TOO HOT) · max ${maxTradesPerDay('options') || '∞'}/day.`,
       maxTrades: maxTradesPerDay('options'),
       underlyings: 'NIFTY 50 + BANKNIFTY only',
-      entry: 'BUY CE or BUY PE only if premium holds above session open (when available)',
-      initialStop: `Hard SL −${optionsStopLossPct()}% of premium — exit if down ${optionsStopLossPct()}%`,
+      entry: 'BUY CE or BUY PE only if premium holds above session open · ride 15m index TRAIN (CE/PE)',
+      initialStop: `Hard SL −${optionsStopLossPct()}% of premium (−${optionsTrainStopPct()}% on TRAIN) — exit if hit`,
       trailOptions: '+5% → cost · +10% lock · then +5% steps',
       hardExit: `Square off by ${SESSION.exitBy} IST`,
       instruments: 'Nearest expiry ATM CE and PE — long premium only',
+      train: trainEnabled()
+        ? `15m breakout trigger + ST(10,3)/EMA9·21/ADX14/VWAP/VolSMA20 (≥${trainMinConfirms()} confirms)`
+        : 'off',
     },
   };
 }
@@ -556,6 +844,11 @@ module.exports = {
   wantedOptionsLots,
   optionsLotRule,
   analyzeIndex,
+  detectIndexTrain,
+  loadIndex15mBars,
+  trainEnabled,
+  trainMinConfirms,
+  optionsTrainStopPct,
   premiumLevels,
   scoreOptionSide,
   patchOptionsBookLtps,

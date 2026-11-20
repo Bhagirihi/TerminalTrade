@@ -416,7 +416,11 @@ function renderBookPanel(state, opts = {}) {
   if (optionsMode && (book.indexes || []).length) {
     const bits = (book.indexes || []).map((ix) => {
       if (!ix || ix.error) return `${ix && ix.indexId ? ix.indexId : '?'} err`;
-      return `${ix.indexId} ${fmt(ix.indexLtp)} ${ix.bias || '—'}`;
+      const train = ix.train ? ` TRAIN→${ix.train}` : '';
+      const conf = ix.train && Array.isArray(ix.trainConfirms) && ix.trainConfirms.length
+        ? ` (${ix.trainConfirms.slice(0, 3).join(', ')})`
+        : '';
+      return `${ix.indexId} ${fmt(ix.indexLtp)} ${ix.bias || '—'}${train}${conf}`;
     });
     lines.push(clip(dim(`Index  ${bits.join(' · ')}`), width));
   }
