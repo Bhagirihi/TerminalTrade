@@ -793,6 +793,15 @@ async function enterFromBook(provider, state, book, product) {
       );
       continue;
     }
+    // Already through T1/T2 on the card — do not open a fresh long.
+    if (pick.action === 'EXIT' || pick.action === 'T1 HIT' || pick.stopHit || pick.t1Hit || pick.t2Hit) {
+      pushLogChange(
+        state,
+        `levelHit:${pick.ticker}`,
+        `Skip ${pick.ticker} — ${pick.action || 'level hit'} (no new BUY)`
+      );
+      continue;
+    }
     const need = Number(pick.spend) || pick.qty * pick.ltp;
     if (Number.isFinite(hard) && hard > 0 && need > hard + 1) {
       unaffordable.push({ ticker: pick.ticker, need: Math.ceil(need), hard });

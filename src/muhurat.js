@@ -565,16 +565,20 @@ function pickTopProfitBuys(rows, maxN = maxLiveBuys()) {
 
 // Promote a WATCH row into a live BUY card so the bot / UI treat it as actionable.
 function promoteWatchToBuy(row) {
+  const override = levelOverrideAction(row);
+  const blocked = actionBlocksNewBuy(override);
+  const action = override || 'BUY';
   return {
     ...row,
     verdict: 'BUY',
-    buy: 'YES',
-    action: 'BUY',
+    buy: blocked ? 'NO' : 'YES',
+    action,
+    stopHit: override === 'EXIT' && longStopHit(row),
     fromWatch: true,
     trade: {
       ...(row.trade || {}),
-      buy: 'YES',
-      action: 'BUY',
+      buy: blocked ? 'NO' : 'YES',
+      action,
       entry: row.entry != null ? row.entry : row.ltp,
       sellStop: row.sellStop,
       sellT1: row.sellT1,
@@ -760,16 +764,54 @@ function applySessionVerdict(row, phaseInfo, openPx) {
   return withTradeSignals(out, phaseInfo);
 }
 
+function rowLevels(row) {
+  const lv = (row && row.levels) || {};
+  return {
+    sl: Number(
+      row && row.sellStop != null ? row.sellStop
+        : (lv.activeStop != null ? lv.activeStop : lv.stopLoss)
+    ),
+    t1: Number(row && row.sellT1 != null ? row.sellT1 : lv.target1),
+    t2: Number(row && row.sellT2 != null ? row.sellT2 : lv.target2),
+    ltp: Number(row && row.ltp),
+  };
+}
+
 /** Long card: LTP at/under SL → stop is hit (show EXIT, do not buy). */
 function longStopHit(row) {
-  if (!row) return false;
-  const ltp = Number(row.ltp);
-  const lv = row.levels || {};
-  const sl = Number(
-    row.sellStop != null ? row.sellStop
-      : (lv.activeStop != null ? lv.activeStop : lv.stopLoss)
-  );
+  const { ltp, sl } = rowLevels(row);
   return Number.isFinite(ltp) && Number.isFinite(sl) && ltp <= sl + 1e-9;
+}
+
+/**
+ * Price vs sticky levels for long cards/positions.
+ * Priority: SL → EXIT, T2 → EXIT, T1 → T1 HIT; else null (caller keeps phase/verdict action).
+ */
+function levelOverrideAction(row) {
+  const { ltp, sl, t1, t2 } = rowLevels(row);
+  if (!(Number.isFinite(ltp) && ltp > 0)) return null;
+  if (Number.isFinite(sl) && ltp <= sl + 1e-9) return 'EXIT';
+  if (Number.isFinite(t2) && ltp >= t2 - 1e-9) return 'EXIT';
+  if (Number.isFinite(t1) && ltp >= t1 - 1e-9) return 'T1 HIT';
+  return null;
+}
+
+function actionBlocksNewBuy(action) {
+  return action === 'EXIT' || action === 'T1 HIT';
+}
+
+/** Open bot position tag: EXIT / T1 HIT / HOLD. */
+function positionLevelAction(pos) {
+  if (!pos) return 'HOLD';
+  const last = Number(pos.last != null ? pos.last : pos.entry);
+  const stop = Number(pos.stop != null ? pos.stop : pos.initialStop);
+  const t1 = Number(pos.t1);
+  const t2 = Number(pos.t2);
+  if (!(Number.isFinite(last) && last > 0)) return 'HOLD';
+  if (Number.isFinite(stop) && last <= stop + 1e-9) return 'EXIT';
+  if (Number.isFinite(t2) && last >= t2 - 1e-9) return 'EXIT';
+  if (Number.isFinite(t1) && last >= t1 - 1e-9) return 'T1 HIT';
+  return 'HOLD';
 }
 
 // Clear ENTRY / BUY / SELL levels for the card (signals only).
@@ -782,9 +824,10 @@ function withTradeSignals(row, phaseInfo) {
   row.sellT1 = lv.target1;
   row.sellT2 = lv.target2;
 
+  const levelAction = levelOverrideAction(row);
   let action = 'WAIT';
-  if (longStopHit(row)) {
-    action = 'EXIT';
+  if (levelAction) {
+    action = levelAction;
   } else if (phaseInfo && phaseInfo.phase === 'before_open') action = 'WAIT OPEN';
   else if (phaseInfo && phaseInfo.phase === 'watching_open') action = 'WATCH OPEN';
   else if (row.verdict === 'BUY') action = 'BUY';
@@ -795,8 +838,10 @@ function withTradeSignals(row, phaseInfo) {
   else action = 'WATCH';
 
   row.entry = entry;
-  row.stopHit = action === 'EXIT';
-  row.buy = action === 'EXIT'
+  row.stopHit = action === 'EXIT' && longStopHit(row);
+  row.t2Hit = action === 'EXIT' && !row.stopHit;
+  row.t1Hit = action === 'T1 HIT';
+  row.buy = actionBlocksNewBuy(action)
     ? 'NO'
     : (row.verdict === 'BUY' ? 'YES' : (row.verdict === 'PREP' ? 'LATER' : 'NO'));
   row.action = action;
@@ -1266,9 +1311,12 @@ async function buildMuhuratBook(provider, {
       row.rr = a.rr;
       row.reward1Pct = a.reward1Pct != null ? a.reward1Pct : row.reward1Pct;
       if (a.fromWatch) {
+        const override = levelOverrideAction(row);
+        const blocked = actionBlocksNewBuy(override);
         row.verdict = 'BUY';
-        row.buy = 'YES';
-        row.action = 'BUY';
+        row.buy = blocked ? 'NO' : 'YES';
+        row.action = override || 'BUY';
+        row.stopHit = override === 'EXIT' && longStopHit(row);
         row.fromWatch = true;
       }
     } else {
@@ -1363,6 +1411,9 @@ module.exports = {
   applySessionVerdict,
   withTradeSignals,
   longStopHit,
+  levelOverrideAction,
+  positionLevelAction,
+  actionBlocksNewBuy,
   applyLiveLtp,
   patchBookLtps,
   inheritLevelLocks,

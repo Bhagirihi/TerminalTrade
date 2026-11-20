@@ -3,6 +3,7 @@
 // Shared USER SIGNAL shape for terminal + web: ticker + IST stamp + price at first sight.
 
 const { istDateKey, istFullSecStr } = require('./time');
+const { levelOverrideAction, actionBlocksNewBuy, positionLevelAction } = require('./muhurat');
 
 const firstSeen = new Map(); // `${day}|${side}|${ticker}` -> { at, atIst, price }
 
@@ -50,6 +51,15 @@ function collectUserSignals(book, bot) {
     for (const r of (book && book.liveBuys) || []) {
       if (!r || !r.ticker || r.verdict !== 'BUY') continue;
       if (!(Number(r.profitScore) > 12) || !(r.qty > 0) || r.orderReady === false) continue;
+      const override = levelOverrideAction(r);
+      // Stop / target hit → SELL cue, never BUY(USER).
+      if (actionBlocksNewBuy(override)) {
+        if (!seenS.has(r.ticker)) {
+          seenS.add(r.ticker);
+          sells.push(stampSignal('SELL', r.ticker, r.ltp != null ? r.ltp : r.entry, now));
+        }
+        continue;
+      }
       if (seenB.has(r.ticker)) continue;
       seenB.add(r.ticker);
       buys.push(stampSignal('BUY', r.ticker, r.ltp != null ? r.ltp : r.entry, now));
@@ -58,7 +68,7 @@ function collectUserSignals(book, bot) {
 
   const err = String((bot && bot.lastError) || '');
   const m = err.match(/^BUY\s+([A-Z0-9 .&-]+)\s*:/i);
-  if (m && m[1] && !seenB.has(m[1].trim())) {
+  if (m && m[1] && !seenB.has(m[1].trim()) && !seenS.has(m[1].trim())) {
     const t = m[1].trim();
     seenB.add(t);
     buys.unshift(stampSignal('BUY', t, null, now));
@@ -67,15 +77,10 @@ function collectUserSignals(book, bot) {
   const exitOnly = phase.phase === 'exit_only' || phase.phase === 'closed';
   for (const p of (bot && bot.positions) || []) {
     if (!p || !p.ticker || !(p.qty > 0) || seenS.has(p.ticker)) continue;
-    const last = Number(p.last);
-    const stop = Number(p.stop);
-    const t2 = Number(p.t2);
-    if (
-      exitOnly
-      || (Number.isFinite(last) && Number.isFinite(stop) && last <= stop)
-      || (Number.isFinite(last) && Number.isFinite(t2) && last >= t2)
-    ) {
+    const tag = positionLevelAction(p);
+    if (exitOnly || tag === 'EXIT' || tag === 'T1 HIT') {
       seenS.add(p.ticker);
+      const last = Number(p.last);
       sells.push(stampSignal('SELL', p.ticker, Number.isFinite(last) ? last : p.entry, now));
     }
   }

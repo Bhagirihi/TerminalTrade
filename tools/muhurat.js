@@ -6,7 +6,16 @@
 const { config } = require('../src/config');
 const { UpstoxProvider } = require('../src/data/upstox');
 const { istDateKey, istFullStr } = require('../src/time');
-const { buildMuhuratBook, SESSION, patchBookLtps, allInstrumentKeys, maxTradesPerDay } = require('../src/muhurat');
+const {
+  buildMuhuratBook,
+  SESSION,
+  patchBookLtps,
+  allInstrumentKeys,
+  maxTradesPerDay,
+  levelOverrideAction,
+  positionLevelAction,
+  actionBlocksNewBuy,
+} = require('../src/muhurat');
 const { buildMuhuratOptionsBook } = require('../src/muhurat-options');
 const { runMuhuratChecks, formatChecks } = require('../src/muhurat-checks');
 const { createMuhuratBot, portfolioLossGate } = require('../src/muhurat-bot');
@@ -249,6 +258,7 @@ function tonePct(n) {
 
 function verdictPaint(v) {
   if (v === 'EXIT' || v === 'STOP HIT') return red(bold('EXIT'));
+  if (v === 'T1 HIT' || v === 'BOOK') return amber(bold('T1 HIT'));
   if (v === 'BUY') return green(bold('BUY'));
   if (v === 'PREP') return amber('PREP');
   if (v === 'WATCH') return amber('WATCH');
@@ -260,19 +270,17 @@ function verdictPaint(v) {
 
 function borderOf(verdict) {
   if (verdict === 'EXIT' || verdict === 'STOP HIT') return red;
+  if (verdict === 'T1 HIT' || verdict === 'BOOK') return amber;
   if (verdict === 'BUY') return green;
   if (verdict === 'PREP' || verdict === 'WATCH') return amber;
   if (verdict === 'TOO HOT' || verdict === 'ERROR') return red;
   return dim;
 }
 
-function cardStopHit(row) {
-  if (!row) return false;
-  if (row.stopHit || row.action === 'EXIT') return true;
-  const ltp = Number(row.ltp);
-  const lv = row.levels || {};
-  const sl = Number(row.sellStop != null ? row.sellStop : (lv.activeStop != null ? lv.activeStop : lv.stopLoss));
-  return Number.isFinite(ltp) && Number.isFinite(sl) && ltp <= sl + 1e-9;
+function cardLevelTag(row) {
+  if (!row) return null;
+  if (row.action === 'EXIT' || row.action === 'T1 HIT') return row.action;
+  return levelOverrideAction(row);
 }
 
 function cardRow(left, right, inner, border) {
@@ -283,10 +291,10 @@ function cardRow(left, right, inner, border) {
 }
 
 function stockBox(row, inner) {
-  const stopHit = cardStopHit(row);
-  const label = stopHit ? 'EXIT' : (row.verdict || '—');
-  const action = stopHit ? 'EXIT' : (row.action || 'WAIT');
-  const border = borderOf(stopHit ? 'EXIT' : row.verdict);
+  const levelTag = cardLevelTag(row);
+  const label = levelTag || (row.verdict || '—');
+  const action = levelTag || (row.action || 'WAIT');
+  const border = borderOf(levelTag || row.verdict);
   const lines = [border('┌' + '─'.repeat(inner) + '┐')];
   if (row.error) {
     lines.push(cardRow(` ${bold(row.ticker)}`, '', inner, border));
@@ -298,7 +306,7 @@ function stockBox(row, inner) {
   const lotBit = row.lots > 0 ? ` ${row.lots}L` : '';
   const qtyBit = row.qty > 0 ? ` qty ${row.qty}${lotBit} ₹${fmt(row.spend)}` : '';
   const liveBit = row.live ? green(' LIVE') : '';
-  const waitBit = !stopHit && row.confirmLeftSec != null ? amber(` ${row.confirmLeftSec}s`) : '';
+  const waitBit = !levelTag && row.confirmLeftSec != null ? amber(` ${row.confirmLeftSec}s`) : '';
   const pScore = row.profitScore != null ? bold(`P${fmt(row.profitScore)}`) : dim(`${row.score || '—'}`);
   const gainerBit = row.fromGainer ? amber(' ▲') : '';
   lines.push(cardRow(` ${bold(row.ticker)} ${verdictPaint(label)}${gainerBit}${liveBit}${waitBit}`, pScore, inner, border));
@@ -306,7 +314,9 @@ function stockBox(row, inner) {
     ` LTP ${fmt(row.ltp)}  RSI ${fmt(row.rsi)}${row.dayChangePct != null ? `  day ${tonePct(row.dayChangePct)}` : ''}${qtyBit}`,
     inner
   ), '', inner, border));
-  const actionTxt = stopHit ? red(bold(action)) : bold(action);
+  const actionTxt = levelTag === 'EXIT'
+    ? red(bold(action))
+    : (levelTag === 'T1 HIT' ? amber(bold(action)) : bold(action));
   lines.push(cardRow(clip(
     ` SL ${red(fmt(row.sellStop || lv.stopLoss))}  T1 ${green(fmt(row.sellT1 || lv.target1))}  T2 ${green(fmt(row.sellT2 || lv.target2))}  ${actionTxt}`,
     inner
@@ -414,6 +424,7 @@ function renderBookPanel(state, opts = {}) {
   if (openPos.length) {
     let invest = 0;
     let value = 0;
+    const posBits = [];
     for (const p of openPos) {
       const qty = Number(p.qty) || 0;
       if (!(qty > 0)) continue;
@@ -422,6 +433,10 @@ function renderBookPanel(state, opts = {}) {
       const spend = Number(p.spend);
       invest += Number.isFinite(spend) && spend > 0 ? spend : (Number.isFinite(entry) ? entry * qty : 0);
       value += Number.isFinite(last) ? last * qty : (Number.isFinite(entry) ? entry * qty : 0);
+      const tag = positionLevelAction(p);
+      const tagTxt = tag === 'EXIT' ? red(bold('EXIT'))
+        : (tag === 'T1 HIT' ? amber(bold('T1 HIT')) : dim('HOLD'));
+      posBits.push(`${p.ticker} ${tagTxt}`);
     }
     const pnl = value - invest;
     lines.push(clip(
@@ -431,6 +446,7 @@ function renderBookPanel(state, opts = {}) {
         ' · ' + red(`−₹${fmt(pnl < 0 ? Math.abs(pnl) : 0)}`),
       width
     ));
+    if (posBits.length) lines.push(clip(dim('  ') + posBits.join(dim(' · ')), width));
   }
   const bud = book.budget;
   const avail = book.availableMargin != null ? book.availableMargin : (bud && bud.availableMargin);
@@ -488,13 +504,14 @@ function renderBookPanel(state, opts = {}) {
       let next = markGainer(r);
       if (next.fromWatch) {
         const { fromWatch, ...rest } = next;
-        const hit = cardStopHit(rest);
+        const override = levelOverrideAction(rest);
+        const blocked = actionBlocksNewBuy(override);
         next = {
           ...rest,
           verdict: 'BUY',
-          buy: hit ? 'NO' : 'YES',
-          action: hit ? 'EXIT' : 'BUY',
-          stopHit: hit,
+          buy: blocked ? 'NO' : 'YES',
+          action: override || 'BUY',
+          stopHit: override === 'EXIT',
         };
       }
       return next;
@@ -525,7 +542,8 @@ function renderBookPanel(state, opts = {}) {
       lines.push(bold('Watch'));
       lines.push(...placeBoxes(watchlistLive, width));
     }
-    const confirming = (book.budget && book.budget.confirming) || [];
+    const confirming = ((book.budget && book.budget.confirming) || [])
+      .filter((r) => !actionBlocksNewBuy(levelOverrideAction(r)));
     if (confirming.length) {
       lines.push(bold('Confirming'));
       lines.push(...placeBoxes(

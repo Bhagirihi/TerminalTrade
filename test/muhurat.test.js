@@ -17,6 +17,8 @@ const {
   applyLiveLtp,
   withTradeSignals,
   longStopHit,
+  levelOverrideAction,
+  positionLevelAction,
   getSession,
   maxTradesPerDay,
   DEFAULT_MAX_TRADES_STOCK,
@@ -307,6 +309,30 @@ test('withTradeSignals shows EXIT when LTP crosses under SL', () => {
   assert.equal(row.stopHit, true);
   assert.equal(row.buy, 'NO');
   assert.equal(longStopHit(row), true);
+});
+
+test('withTradeSignals shows T1 HIT / EXIT at targets', () => {
+  const phase = sessionPhase(istToEpoch('2026-11-10', 10, 0), 'regular');
+  const t1 = withTradeSignals({
+    ticker: 'NTPC',
+    verdict: 'BUY',
+    ltp: 324,
+    levels: { entry: 320, stopLoss: 318, activeStop: 318, target1: 323, target2: 326 },
+  }, phase);
+  assert.equal(t1.action, 'T1 HIT');
+  assert.equal(t1.buy, 'NO');
+  assert.equal(levelOverrideAction(t1), 'T1 HIT');
+
+  const t2 = withTradeSignals({
+    ticker: 'NTPC',
+    verdict: 'BUY',
+    ltp: 327,
+    levels: { entry: 320, stopLoss: 318, activeStop: 318, target1: 323, target2: 326 },
+  }, phase);
+  assert.equal(t2.action, 'EXIT');
+  assert.equal(t2.t2Hit, true);
+  assert.equal(positionLevelAction({ last: 327, stop: 318, t1: 323, t2: 326 }), 'EXIT');
+  assert.equal(positionLevelAction({ last: 324, stop: 318, t1: 323, t2: 326 }), 'T1 HIT');
 });
 
 test('applyLiveLtp options: SL never drops when premium falls', () => {
