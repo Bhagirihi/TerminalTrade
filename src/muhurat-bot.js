@@ -178,6 +178,69 @@ function pushLog(state, msg) {
   }
 }
 
+// Avoid spamming the same waiting/budget line every few seconds.
+const lastLogByKey = new Map();
+function pushLogChange(state, key, msg) {
+  if (!msg) return false;
+  const id = `${state.date || ''}|${bookModeOf(state.bookMode || state.mode)}|${key}`;
+  if (lastLogByKey.get(id) === msg) return false;
+  lastLogByKey.set(id, msg);
+  pushLog(state, msg);
+  return true;
+}
+
+/** One-line why options are flat (CE/PE verdict + score + RSI), esp. after a PE SL on an up day. */
+function optionsIdleStatus(book, state) {
+  const rows = [];
+  const seen = new Set();
+  for (const list of [book && book.core, book && book.extrasWatch, book && book.extrasSkipHot, book && book.liveBuys]) {
+    for (const r of list || []) {
+      if (!r || !r.ticker || seen.has(r.ticker)) continue;
+      seen.add(r.ticker);
+      rows.push(r);
+    }
+  }
+  if (!rows.length) return 'No live BUY picks yet — waiting';
+
+  const closedPe = Object.values((state && state.positions) || {}).some(
+    (p) => p && p.status === 'CLOSED' && String(p.right || '').toUpperCase() === 'PE'
+  );
+  const bits = rows
+    .slice()
+    .sort((a, b) => {
+      // Prefer CE first after a PE stop-out / when explaining a silent up day.
+      const ar = String(a.right || '').toUpperCase() === 'CE' ? 0 : 1;
+      const br = String(b.right || '').toUpperCase() === 'CE' ? 0 : 1;
+      if (ar !== br) return ar - br;
+      return (Number(b.profitScore) || 0) - (Number(a.profitScore) || 0);
+    })
+    .slice(0, 4)
+    .map((r) => {
+      const right = String(r.right || '').toUpperCase() || '?';
+      const verdict = r.verdict || r.action || '—';
+      const p = Number(r.profitScore);
+      const score = Number(r.score);
+      const rsi = Number(r.rsi);
+      const why = Array.isArray(r.reasons) && r.reasons.length
+        ? r.reasons.slice(0, 2).join(', ')
+        : '';
+      const parts = [
+        `${r.ticker || right}`,
+        verdict,
+        Number.isFinite(p) ? `P${p}` : null,
+        Number.isFinite(score) ? `score${score}` : null,
+        Number.isFinite(rsi) ? `RSI${Math.round(rsi)}` : null,
+        why || null,
+      ].filter(Boolean);
+      return parts.join(' ');
+    });
+
+  const head = closedPe
+    ? 'No options BUY after PE exit'
+    : 'No live BUY picks yet';
+  return `${head} · ${bits.join(' · ')}`;
+}
+
 function roundTick(n, tick = 0.05) {
   return Math.round(Number(n) / tick) * tick;
 }
@@ -411,7 +474,7 @@ async function enterFromBook(provider, state, book, product) {
   state.lossGate = lossGate;
   if (lossGate.blocked) {
     state.lastError = lossGate.reason;
-    pushLog(state, lossGate.reason);
+    pushLogChange(state, 'lossGate', lossGate.reason);
     return;
   }
   if (state.lastError && String(state.lastError).startsWith('DO NOT TRADE')) {
@@ -421,6 +484,8 @@ async function enterFromBook(provider, state, book, product) {
   if (state.orderBlockUntil && Date.now() < state.orderBlockUntil) {
     return;
   }
+  const mode = bookModeOf(book);
+  state.bookMode = mode;
   const picks = (book.liveBuys || []).filter(
     (r) => r.verdict === 'BUY'
       && r.qty > 0
@@ -432,19 +497,19 @@ async function enterFromBook(provider, state, book, product) {
     const warming = (book.budget && book.budget.confirming) || [];
     if (warming.length) {
       const tip = warming.slice(0, 3).map((r) => `${r.ticker} ${r.confirmLeftSec || '?'}s`).join(', ');
-      pushLog(state, `Waiting confirm (${tip}) — no order yet`);
+      pushLogChange(state, 'waiting', `Waiting confirm (${tip}) — no order yet`);
+    } else if (mode === 'options') {
+      pushLogChange(state, 'waiting', optionsIdleStatus(book, state));
     } else {
-      pushLog(state, 'No live BUY picks yet — waiting');
+      pushLogChange(state, 'waiting', 'No live BUY picks yet — waiting');
     }
     return;
   }
-  const mode = bookModeOf(book);
-  state.bookMode = mode;
   const tradeCap = maxTradesPerDay(mode);
   let tradesToday = tradesOpenedCount(state);
   state.tradesToday = tradesToday;
   if (tradeCap > 0 && tradesToday >= tradeCap) {
-    pushLog(state, `Max ${tradeCap} ${mode} trades/day reached (${tradesToday}) — no new BUY`);
+    pushLogChange(state, 'maxTrades', `Max ${tradeCap} ${mode} trades/day reached (${tradesToday}) — no new BUY`);
     return;
   }
   let spent = Object.values(state.positions).reduce(
@@ -452,16 +517,18 @@ async function enterFromBook(provider, state, book, product) {
     0
   );
   const cap = spendCap(book, state);
+  const hard = Number(state.budgetLimit);
+  const unaffordable = [];
   for (const pick of picks) {
     if (tradeCap > 0 && tradesToday >= tradeCap) {
-      pushLog(state, `Max ${tradeCap} trades/day — stopping new entries`);
+      pushLogChange(state, 'maxTrades', `Max ${tradeCap} trades/day — stopping new entries`);
       break;
     }
     // Options: long premium only (BUY CE / BUY PE). Never sell-to-open.
     if (mode === 'options') {
       const right = String(pick.right || '').toUpperCase();
       if (right && right !== 'CE' && right !== 'PE') {
-        pushLog(state, `Skip ${pick.ticker} — options entries are BUY CE/PE only`);
+        pushLogChange(state, `skipRight:${pick.ticker}`, `Skip ${pick.ticker} — options entries are BUY CE/PE only`);
         continue;
       }
     }
@@ -471,13 +538,12 @@ async function enterFromBook(provider, state, book, product) {
     // Failed earlier this session — don't hammer the same name until backoff clears.
     if (state.failedBuys && state.failedBuys[pick.ticker] && Date.now() < state.failedBuys[pick.ticker]) continue;
     const need = Number(pick.spend) || pick.qty * pick.ltp;
-    const hard = Number(state.budgetLimit);
     if (Number.isFinite(hard) && hard > 0 && need > hard + 1) {
-      pushLog(state, `Skip ${pick.ticker} — need ₹${Math.ceil(need)}, budget only ₹${hard} (raise options/stock budget)`);
+      unaffordable.push({ ticker: pick.ticker, need: Math.ceil(need), hard });
       continue;
     }
     if (spent + need > cap + 1) {
-      pushLog(state, `Skip ${pick.ticker} — need ₹${Math.ceil(need)}, cap ₹${Math.floor(cap)}`);
+      unaffordable.push({ ticker: pick.ticker, need: Math.ceil(need), hard: Math.floor(cap), kind: 'cap' });
       continue;
     }
     try {
@@ -552,6 +618,22 @@ async function enterFromBook(provider, state, book, product) {
       state.failedBuys = state.failedBuys || {};
       state.failedBuys[pick.ticker] = Date.now() + 60 * 1000;
     }
+  }
+  if (unaffordable.length) {
+    const minNeed = Math.min(...unaffordable.map((u) => u.need));
+    const budgetLabel = Number.isFinite(hard) && hard > 0 ? hard : (unaffordable[0].hard || 0);
+    const names = unaffordable
+      .slice(0, 4)
+      .map((u) => `${u.ticker} ₹${u.need}`)
+      .join(', ');
+    const hint = mode === 'equity'
+      ? 'raise MUHURAT_BUDGET_STOCK (or type a higher stock budget at YES)'
+      : 'raise MUHURAT_BUDGET_OPTIONS';
+    pushLogChange(
+      state,
+      'unaffordable',
+      `Budget ₹${budgetLabel} too small for Live BUY (need ≥ ₹${minNeed}) — ${names}${unaffordable.length > 4 ? '…' : ''} · ${hint}`
+    );
   }
   state.entered = Object.values(state.positions).some((p) => p.qty > 0);
 }
@@ -742,4 +824,6 @@ module.exports = {
   positionTrail,
   stageFor,
   stopForStage,
+  optionsIdleStatus,
+  pushLogChange,
 };

@@ -14,17 +14,30 @@ const amber = (t) => paint('33', t);
 const green = (t) => paint('32', t);
 const dim = (t) => paint('2', t);
 
-function parseBudget(raw, fallback) {
+// Typical cash names need ~₹5k–₹8k+ for 1 lot-sized BUY; ₹2k just spam-skips.
+const MIN_STOCK_BUDGET = 10000;
+const MIN_OPTIONS_BUDGET = 5000;
+
+function parseBudget(raw, fallback, { min = 1000, label = 'budget' } = {}) {
   if (!raw) return fallback;
   const n = Number(String(raw).replace(/,/g, ''));
-  if (Number.isFinite(n) && n >= 1000) return Math.floor(n);
-  console.log(amber(`Invalid budget — using ₹${fallback}`));
-  return fallback;
+  if (!Number.isFinite(n) || n < 1000) {
+    console.log(amber(`Invalid ${label} — using ₹${fallback}`));
+    return fallback;
+  }
+  const floor = Math.floor(n);
+  if (floor < min) {
+    console.log(amber(
+      `${label} ₹${floor} is too low (min ₹${min} to avoid unaffordable skips) — using ₹${Math.max(fallback, min)}`
+    ));
+    return Math.max(fallback, min);
+  }
+  return floor;
 }
 
-async function askBudgetLine(rl, label, defaultBudget) {
+async function askBudgetLine(rl, label, defaultBudget, min) {
   const raw = String(await rl.question(`${label} [default ${defaultBudget}]: `)).trim();
-  return parseBudget(raw, defaultBudget);
+  return parseBudget(raw, defaultBudget, { min, label });
 }
 
 async function askBudgets(rl, { wantStock, wantOptions, stockDefault, optionsDefault, defaultBudget }) {
@@ -33,14 +46,14 @@ async function askBudgets(rl, { wantStock, wantOptions, stockDefault, optionsDef
   let budget = defaultBudget;
 
   if (wantStock && wantOptions) {
-    stockBudget = await askBudgetLine(rl, 'Stock budget in INR', stockDefault);
-    optionsBudget = await askBudgetLine(rl, 'Options budget in INR', optionsDefault);
+    stockBudget = await askBudgetLine(rl, 'Stock budget in INR', stockDefault, MIN_STOCK_BUDGET);
+    optionsBudget = await askBudgetLine(rl, 'Options budget in INR', optionsDefault, MIN_OPTIONS_BUDGET);
     budget = stockBudget + optionsBudget;
   } else if (wantOptions) {
-    optionsBudget = await askBudgetLine(rl, 'Options budget in INR', optionsDefault);
+    optionsBudget = await askBudgetLine(rl, 'Options budget in INR', optionsDefault, MIN_OPTIONS_BUDGET);
     budget = optionsBudget;
   } else {
-    stockBudget = await askBudgetLine(rl, 'Stock budget in INR', stockDefault);
+    stockBudget = await askBudgetLine(rl, 'Stock budget in INR', stockDefault, MIN_STOCK_BUDGET);
     budget = stockBudget;
   }
   return { stockBudget, optionsBudget, budget };

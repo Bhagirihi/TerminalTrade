@@ -9,6 +9,8 @@ const {
   CONFIRM,
   createMuhuratBot,
   portfolioLossGate,
+  optionsIdleStatus,
+  pushLogChange,
 } = require('../src/muhurat-bot');
 
 test('liveEnabled requires live + confirm + BUY approval', () => {
@@ -85,4 +87,44 @@ test('portfolioLossGate blocks near 20% book loss', () => {
   assert.equal(empty.blocked, false);
   if (prev == null) delete process.env.MUHURAT_NO_TRADE_LOSS_PCT;
   else process.env.MUHURAT_NO_TRADE_LOSS_PCT = prev;
+});
+
+test('optionsIdleStatus explains CE block after PE exit', () => {
+  const msg = optionsIdleStatus(
+    {
+      core: [
+        {
+          ticker: 'NIFTY 25200 CE',
+          right: 'CE',
+          verdict: 'TOO HOT',
+          profitScore: 14,
+          score: 9,
+          rsi: 76,
+          reasons: ['CE bias'],
+        },
+        {
+          ticker: 'NIFTY 25200 PE',
+          right: 'PE',
+          verdict: 'WATCH',
+          profitScore: 8,
+          score: 4,
+          rsi: 76,
+          reasons: ['against CE bias'],
+        },
+      ],
+    },
+    { positions: { x: { status: 'CLOSED', right: 'PE' } } }
+  );
+  assert.match(msg, /No options BUY after PE exit/);
+  assert.match(msg, /NIFTY 25200 CE/);
+  assert.match(msg, /TOO HOT/);
+  assert.match(msg, /RSI76/);
+});
+
+test('pushLogChange only records when message changes', () => {
+  const state = { date: '2099-01-03', bookMode: 'options', mode: 'options', log: [] };
+  assert.equal(pushLogChange(state, 'waiting', 'same'), true);
+  assert.equal(pushLogChange(state, 'waiting', 'same'), false);
+  assert.equal(pushLogChange(state, 'waiting', 'changed'), true);
+  assert.equal(state.log.length, 2);
 });
