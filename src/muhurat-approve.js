@@ -59,6 +59,90 @@ async function askBudgets(rl, { wantStock, wantOptions, stockDefault, optionsDef
   return { stockBudget, optionsBudget, budget };
 }
 
+/**
+ * Non-interactive gate for PM2 / Oracle (no TTY).
+ * MUHURAT_AUTO_APPROVE=live|paper|watch
+ * live also needs MUHURAT_LIVE=true + MUHURAT_LIVE_CONFIRM=I_ACCEPT_REAL_ORDERS.
+ */
+function resolveAutoApprove({
+  defaultBudget = DEFAULT_BUDGET,
+  stockDefault,
+  optionsDefault,
+  liveAvailable = true,
+  wantStock = true,
+  wantOptions = false,
+} = {}) {
+  const auto = String(process.env.MUHURAT_AUTO_APPROVE || '').trim().toLowerCase();
+  if (!auto) return null;
+
+  const stockBudget = parseBudget(
+    process.env.MUHURAT_BUDGET_STOCK,
+    stockDefault,
+    { min: MIN_STOCK_BUDGET, label: 'stock budget' }
+  );
+  const optionsBudget = parseBudget(
+    process.env.MUHURAT_BUDGET_OPTIONS,
+    optionsDefault,
+    { min: MIN_OPTIONS_BUDGET, label: 'options budget' }
+  );
+  let budget = defaultBudget;
+  if (wantStock && wantOptions) budget = stockBudget + optionsBudget;
+  else if (wantOptions) budget = optionsBudget;
+  else budget = stockBudget;
+
+  if (auto === 'live' || auto === 'yes') {
+    if (!liveAvailable) {
+      return {
+        approved: false,
+        paper: false,
+        budget,
+        stockBudget,
+        optionsBudget,
+        reason: 'MUHURAT_AUTO_APPROVE=live but MUHURAT_LIVE is not armed',
+      };
+    }
+    console.log(red(bold(
+      `AUTO LIVE (MUHURAT_AUTO_APPROVE) — stocks ₹${stockBudget.toLocaleString('en-IN')} · options ₹${optionsBudget.toLocaleString('en-IN')}`
+    )));
+    return {
+      approved: true,
+      paper: false,
+      budget,
+      stockBudget,
+      optionsBudget,
+      reason: 'MUHURAT_AUTO_APPROVE=live',
+    };
+  }
+
+  if (auto === 'paper') {
+    console.log(green(bold(
+      `AUTO PAPER (MUHURAT_AUTO_APPROVE) — stocks ₹${stockBudget.toLocaleString('en-IN')} · options ₹${optionsBudget.toLocaleString('en-IN')} (no real orders)`
+    )));
+    return {
+      approved: false,
+      paper: true,
+      budget,
+      stockBudget,
+      optionsBudget,
+      reason: 'MUHURAT_AUTO_APPROVE=paper',
+    };
+  }
+
+  if (auto === 'watch' || auto === 'no' || auto === 'off') {
+    return {
+      approved: false,
+      paper: false,
+      budget,
+      stockBudget,
+      optionsBudget,
+      reason: 'MUHURAT_AUTO_APPROVE=watch — signals only',
+    };
+  }
+
+  console.log(amber(`Unknown MUHURAT_AUTO_APPROVE=${auto} — use live|paper|watch`));
+  return null;
+}
+
 async function askBuyApproval({
   defaultBudget = DEFAULT_BUDGET,
   defaultStockBudget,
@@ -71,6 +155,16 @@ async function askBuyApproval({
   const stockDefault = Number(defaultStockBudget) > 0 ? Number(defaultStockBudget) : defaultBudget;
   const optionsDefault = Number(defaultOptionsBudget) > 0 ? Number(defaultOptionsBudget) : defaultBudget;
 
+  const auto = resolveAutoApprove({
+    defaultBudget,
+    stockDefault,
+    optionsDefault,
+    liveAvailable,
+    wantStock,
+    wantOptions,
+  });
+  if (auto) return auto;
+
   if (!process.stdin.isTTY) {
     return {
       approved: false,
@@ -78,7 +172,7 @@ async function askBuyApproval({
       budget: defaultBudget,
       stockBudget: stockDefault,
       optionsBudget: optionsDefault,
-      reason: 'No interactive terminal — cannot approve. Signals-only.',
+      reason: 'No interactive terminal — set MUHURAT_AUTO_APPROVE=paper|live for PM2. Signals-only.',
     };
   }
 
@@ -190,4 +284,4 @@ async function askBuyApproval({
   }
 }
 
-module.exports = { askBuyApproval };
+module.exports = { askBuyApproval, resolveAutoApprove };
