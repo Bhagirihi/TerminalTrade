@@ -112,8 +112,14 @@ async function fetchMinuteMonth(provider, symbol, ym, noFetch) {
   return bars;
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
+/**
+ * Reusable stocks-lane backtest. Returns { from, to, dayResults, summary,
+ * reportPath }. Throws (does not exit) when the token is missing or the
+ * cache is incomplete under --no-fetch, so a caller (e.g. the terminal
+ * report) can catch it and still show the live part. `log` receives the
+ * progress lines; pass a no-op to silence them.
+ */
+async function runStocksBacktest(args, log = console.log) {
   const today = istDateKey(Date.now());
   const to = args.to || shiftDays(today, -1);
   const from = args.from || shiftMonths(to, -args.years * 12);
@@ -122,22 +128,20 @@ async function main() {
     ? UNIVERSE.filter((s) => args.symbols.includes(s.ticker))
     : UNIVERSE;
   if (!symbols.length) {
-    console.error('No symbols matched --symbols');
-    process.exit(1);
+    throw new Error('No symbols matched --symbols');
   }
 
   let provider = null;
   if (!args.noFetch) {
     if (!config.upstox.accessToken) {
-      console.error('Set UPSTOX_ACCESS_TOKEN in .env (run npm run login first), or use --no-fetch with a warm cache.');
-      process.exit(1);
+      throw new Error('Set UPSTOX_ACCESS_TOKEN in .env (run npm run login first), or use --no-fetch with a warm cache.');
     }
     provider = new UpstoxProvider(config.upstox.accessToken);
   }
 
-  console.log(`Muhurat stocks backtest — ${from} → ${to} (${symbols.length} names, budget ₹${args.budget}, confirm ${args.confirmSec}s, max ${args.maxTrades}/day)`);
-  console.log('Universe: fixed 33 only (NSE gainers excluded — live-only endpoint, no archive).');
-  console.log('Sizing: lane budget only (C1 neutralised — see header). Loss gate: disabled.');
+  log(`Muhurat stocks backtest — ${from} → ${to} (${symbols.length} names, budget ₹${args.budget}, confirm ${args.confirmSec}s, max ${args.maxTrades}/day)`);
+  log('Universe: fixed 33 only (NSE gainers excluded — live-only endpoint, no archive).');
+  log('Sizing: lane budget only (C1 neutralised — see header). Loss gate: disabled.');
 
   // --- Fetch daily bars (warmup + range) per symbol.
   const dailyByTicker = new Map();
@@ -151,7 +155,7 @@ async function main() {
   // Trading calendar: SBIN daily dates inside the range (NSE days).
   const sbin = dailyByTicker.get('SBIN') || [...dailyByTicker.values()][0] || [];
   const tradingDays = [...new Set(sbin.map((b) => istDateKey(b.t)))].filter((d) => d >= from && d <= to).sort();
-  console.log(`Trading days in range: ${tradingDays.length}`);
+  log(`Trading days in range: ${tradingDays.length}`);
 
   // --- Fetch 1m bars, month-chunked per symbol.
   const chunks = monthChunks(from, to);
@@ -188,9 +192,9 @@ async function main() {
     fs.mkdirSync(DAYS_DIR, { recursive: true });
     fs.writeFileSync(path.join(DAYS_DIR, `${date}.json`), JSON.stringify(dayDoc(result), null, 2));
     if (result.skipped) {
-      console.log(`  ${date}  skipped (${result.skipped})`);
+      log(`  ${date}  skipped (${result.skipped})`);
     } else {
-      console.log(`  ${date}  trades ${result.tradeCount}  net ${result.netPnl >= 0 ? '+' : ''}₹${result.netPnl.toLocaleString('en-IN')}`);
+      log(`  ${date}  trades ${result.tradeCount}  net ${result.netPnl >= 0 ? '+' : ''}₹${result.netPnl.toLocaleString('en-IN')}`);
     }
   }
 
@@ -227,7 +231,12 @@ async function main() {
   };
   const outPath = path.join(CACHE, `report-${from}_${to}.json`);
   writeCache(outPath, report);
+  return { from, to, dayResults, summary, reportPath: outPath };
+}
 
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const { from, to, summary, reportPath } = await runStocksBacktest(args);
   console.log('\n=== Muhurat stocks lane — 1-year backtest ===');
   console.log(`Period: ${from} → ${to}  ·  Days: ${summary.days}  ·  Trades: ${summary.trades}`);
   console.log(`Win rate: ${summary.winRate == null ? '—' : `${summary.winRate}%`}  ·  Wins ${summary.wins} / Losses ${summary.losses} / Flat ${summary.flats}`);
@@ -237,11 +246,15 @@ async function main() {
   console.log(`Expectancy/trade (net): ${summary.expectancyNet == null ? '—' : `₹${summary.expectancyNet.toLocaleString('en-IN')}`}  ·  Max drawdown: ₹${summary.maxDrawdown.toLocaleString('en-IN')}`);
   console.log(`Best day: ${summary.bestDay ? `${summary.bestDay.date} ₹${summary.bestDay.netPnl.toLocaleString('en-IN')}` : '—'}  ·  Worst day: ${summary.worstDay ? `${summary.worstDay.date} ₹${summary.worstDay.netPnl.toLocaleString('en-IN')}` : '—'}`);
   console.log(`Trades/day: ${summary.tradesPerDay}`);
-  console.log(`\nSaved ${outPath}`);
+  console.log(`\nSaved ${reportPath}`);
   console.log('Day ledgers (live-ledger shape): cache/muhurat-backtest/days/<date>.json');
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
+
+module.exports = { runStocksBacktest, parseArgs, shiftDays, shiftMonths, monthChunks };

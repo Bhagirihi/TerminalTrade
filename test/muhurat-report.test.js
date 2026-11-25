@@ -69,3 +69,74 @@ test('terminal report shows the same headline numbers as the web report', () => 
   assert.ok(text.includes('COFORGE'), 'open positions listed');
   assert.ok(text.includes('not counted in win rate'), 'open positions excluded note');
 });
+
+// --- Backtest + shareable HTML (2022 range) ---
+
+const { splitRange, backtestResultToReport, renderHtmlReport, buildReport } = require('../tools/muhurat-report');
+
+function stubDay(date, ticker, netPnl) {
+  return {
+    date,
+    trades: [{ ticker, mode: 'equity', key: `NSE_EQ|${ticker}`, qty: 10, entry: 100, exit: 100 + netPnl / 10, spend: 1000, pnl: netPnl, charges: 0, netPnl, exitReason: 'T2', status: 'CLOSED' }],
+    tradeCount: 1, wins: netPnl > 0 ? 1 : 0, losses: netPnl < 0 ? 1 : 0,
+    grossPnl: netPnl, charges: 0, netPnl, investment: 1000,
+  };
+}
+
+test('splitRange: inside the ledger → live only; before it → backtest + live', () => {
+  const first = '2026-11-12';
+  assert.deepStrictEqual(splitRange('2026-11-19', '2026-11-23', first), { live: ['2026-11-19', '2026-11-23'], backtest: null });
+  assert.deepStrictEqual(splitRange('2022-11-19', '2026-11-23', first), { live: ['2026-11-12', '2026-11-23'], backtest: ['2022-11-19', '2026-11-11'] });
+  assert.deepStrictEqual(splitRange('2022-01-01', '2022-12-31', first), { live: null, backtest: ['2022-01-01', '2022-12-31'] });
+  assert.deepStrictEqual(splitRange('2022-11-19', '2026-11-23', null), { live: null, backtest: ['2022-11-19', '2026-11-23'] });
+});
+
+test('backtest section is labelled simulated and never mixes with live', () => {
+  const bt = backtestResultToReport([stubDay('2023-01-02', 'SBIN', 500), stubDay('2023-01-03', 'SBIN', -200)]);
+  assert.strictEqual(bt.summary.trades, 2);
+  assert.strictEqual(bt.summary.winRate, 50);
+  const text = renderReport(bt, { noColor: true, width: 78, mode: 'backtest' });
+  assert.ok(text.includes('SIMULATED'), 'backtest label');
+  assert.ok(text.includes('Stocks lane only'), 'fidelity note');
+  assert.ok(text.includes('NOT backtested'), 'options lane excluded note');
+  assert.ok(!text.includes('LIVE PERFORMANCE'), 'no live label on a backtest');
+});
+
+test('buildReport merges live + stub backtest, and survives a backtest failure', async () => {
+  const stub = async () => ({ dayResults: [stubDay('2023-01-02', 'SBIN', 500)] });
+  const ok = await buildReport({
+    liveDocs: docs, ledgerFirst: '2026-11-12',
+    from: '2022-11-19', to: '2026-11-23', backtest: null,
+    runBacktest: stub, budget: 15000, confirmSec: 60, maxTrades: 5, noFetch: false, log: () => {},
+  });
+  assert.strictEqual(ok.sections.length, 2);
+  assert.strictEqual(ok.sections[0].mode, 'live');
+  assert.strictEqual(ok.sections[1].mode, 'backtest');
+  assert.strictEqual(ok.backtestSkipped, null);
+
+  const failing = async () => { throw new Error('Set UPSTOX_ACCESS_TOKEN in .env'); };
+  const partial = await buildReport({
+    liveDocs: docs, ledgerFirst: '2026-11-12',
+    from: '2022-11-19', to: '2026-11-23', backtest: null,
+    runBacktest: failing, budget: 15000, confirmSec: 60, maxTrades: 5, noFetch: false, log: () => {},
+  });
+  assert.strictEqual(partial.sections.length, 1, 'live part still returned');
+  assert.strictEqual(partial.sections[0].mode, 'live');
+  assert.ok(partial.backtestSkipped.includes('UPSTOX_ACCESS_TOKEN'), 'token error reported, not hidden');
+});
+
+test('HTML report embeds the numbers, tiles and curve', () => {
+  const live = computeHistoryStats(docs);
+  const bt = backtestResultToReport([stubDay('2023-01-02', 'SBIN', 500)]);
+  const html = renderHtmlReport(
+    [{ mode: 'live', result: live }, { mode: 'backtest', result: bt }],
+    { from: '2022-11-19', to: '2026-11-23' },
+  );
+  assert.ok(html.includes('Muhurat2 — Performance Report'), 'title');
+  assert.ok(html.includes('WINNING PROBABILITY'), 'tiles');
+  assert.ok(html.includes('<svg'), 'curve');
+  assert.ok(html.includes('Live performance'), 'live section');
+  assert.ok(html.includes('Stocks backtest (simulated)'), 'backtest section');
+  assert.ok(html.includes('NIFTY CE'), 'live trades listed');
+  assert.ok(html.includes('SBIN'), 'backtest trades listed');
+});
