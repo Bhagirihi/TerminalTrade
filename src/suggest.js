@@ -86,6 +86,7 @@ async function suggestFor(api, symbol, budgetState, opts = {}) {
     return { ...base, status: 'no-data', reason: 'no 5m candles in the last 5 days (market closed?)' };
   }
   const asOf = `${istDateKey(last(bars5).t)} ${istTimeStr(last(bars5).t)} IST`;
+  base.bars5 = bars5; // the tick keeps these for the live indicator preview
   const entry = evaluateEntry(bars5);
   const regime = classifyRegime(bars5);
   if (!entry.evaluable) return { ...base, status: 'no-data', entry, regime, asOf, reason: entry.reason };
@@ -269,6 +270,25 @@ function entrySummary(entry) {
 // The whole point of this layout: the verdict first, then only the detail
 // that explains it, inside a bordered card. A trade shows the card up top;
 // a no-trade shows the closest side and why it fell short, in plain words.
+
+// Live indicator preview: the four entry checks recomputed on the forming
+// 5m bar (live LTP as its close). Display only — it never gates an entry,
+// and a '?' means the reading is not finite (not enough bars yet).
+function liveLine(live, side) {
+  if (!live || !Number.isFinite(live.close)) return null;
+  const bull = side === 'CE';
+  const v = live;
+  const mark = (ok) => (ok === true ? term.green('\u2713') : ok === false ? term.red('\u2717') : term.yellow('?'));
+  const fin = (...xs) => xs.every(Number.isFinite);
+  const m = [
+    mark(fin(v.close, v.vwap) ? (bull ? v.close > v.vwap : v.close < v.vwap) : undefined),
+    mark(fin(v.emaFast, v.emaSlow) ? (bull ? v.emaFast > v.emaSlow : v.emaFast < v.emaSlow) : undefined),
+    mark(fin(v.rsi) ? (bull ? v.rsi > 50 : v.rsi < 50) : undefined),
+    mark(fin(v.macdLine, v.macdSignal, v.macdHist) ? (bull ? v.macdLine > v.macdSignal && v.macdHist > 0 : v.macdLine < v.macdSignal && v.macdHist < 0) : undefined),
+  ];
+  return `LIVE forming bar \u2014 ${m[0]} VWAP ${m[1]} EMA ${m[2]} RSI ${m[3]} MACD \u00b7 close ${px(v.close)} vs VWAP ${px(v.vwap)} (not a signal)`;
+}
+
 function formatSuggestion(s) {
   const titleParts = [s.id];
   if (s.asOf) titleParts.push(s.asOf.slice(11)); // "12:45 IST"
@@ -285,6 +305,10 @@ function formatSuggestion(s) {
     lines.push(term.yellow(`\u2014 ${s.reason || 'no data'}`));
     return term.card(title, lines);
   }
+  // Which side the live preview reads for: the passing side on a trade
+  // (or a score-missed setup), the closest side on a no-trade.
+  const liveSide = s.entry && s.entry.passed ? s.entry.side : s.entry ? closestSide(s.entry) : null;
+  const ll = liveSide ? liveLine(s.live, liveSide) : null;
   if (s.status === 'trade') {
     const c = s.card;
     lines.push(term.green(term.bold(`\u2713 TRADE: BUY ${c.ticker} \u2014 expiry ${c.expiry}, lot ${c.lot}`)));
@@ -296,6 +320,7 @@ function formatSuggestion(s) {
     lines.push('');
     lines.push(`Score ${s.score.score}/${s.score.max} (${s.score.verdict}) \u2014 ${scoreSummary(s.score)}`);
     lines.push(`${term.green('\u2713')} All 5 ${s.entry.side} checks passed \u2014 ${entrySummary(s.entry)}`);
+    if (ll) lines.push(ll);
     return term.card(title, lines);
   }
   // No trade.
@@ -310,6 +335,7 @@ function formatSuggestion(s) {
     const nodataNote = nodata.length ? ` (${nodata.map((k) => (k === 'volumeBacked' ? 'volume' : k)).join(', ')} not available)` : '';
     lines.push(term.yellow(term.bold(`\u2717 NO TRADE \u2014 ${side} passed ${passed} of ${measured} measured checks; ${reason}.${nodataNote}`)));
     lines.push(...formatEntryChecksSide(s.entry, side));
+    if (ll) lines.push(ll);
     return term.card(title, lines);
   }
   // Entry passed but the score is below the 70 bar.
@@ -320,6 +346,7 @@ function formatSuggestion(s) {
   }
   lines.push(`Score ${s.score.score}/${s.score.max} (${s.score.verdict}) \u2014 ${scoreSummary(s.score)}`);
   lines.push(`${term.green('\u2713')} All 5 ${s.entry.side} checks passed \u2014 ${entrySummary(s.entry)}`);
+  if (ll) lines.push(ll);
   return term.card(title, lines);
 }
 

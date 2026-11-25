@@ -117,6 +117,20 @@ class UpstoxApi {
       .sort((a, b) => a.t - b.t);
   }
 
+  // The still-forming bar for the current period (today's intraday last
+  // candle), or null when there is none (before the open / after close).
+  // Used ONLY for the live indicator preview — never for entries.
+  async getFormingBar(instrumentKey, minutes) {
+    const closeMs = minutes * 60 * 1000;
+    const now = Date.now();
+    try {
+      const bars = await this.getIntradayCandles(instrumentKey, minutes);
+      const last = bars[bars.length - 1];
+      if (last && last.t + closeMs > now) return last;
+    } catch (_) { /* no forming bar */ }
+    return null;
+  }
+
   async getOptionContracts(instrumentKey) {
     const j = await this.fetchJson(`${BASE}/v2/option/contract?instrument_key=${encodeURIComponent(instrumentKey)}`);
     return (j && j.data) || [];

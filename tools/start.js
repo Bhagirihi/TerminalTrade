@@ -24,6 +24,7 @@ const { upstoxCredentials, runInteractiveUpstoxLogin } = require('../src/upstox-
 const { UpstoxApi } = require('../src/upstox-api');
 const { suggestAll, formatSuggestion, loadOptionBook, atmBandKeys, UNDERLYINGS } = require('../src/suggest');
 const { spreadOk } = require('../src/trade-score');
+const { indicatorValues } = require('../src/entry-rules');
 const { nearestStepStrike } = require('../src/strikes');
 const { loadPaperTrades, savePaperTrades, recordPaperTrade, hasOpenTradeFor, closePaperTrade } = require('../src/paper');
 const { loadLiveTrades, saveLiveTrades, recordLiveTrade, placeLiveEntry, syncLivePositions, exitLivePosition } = require('../src/trading');
@@ -388,6 +389,24 @@ async function warmLiquidityBand(state, api) {
   }
 }
 
+// Recompute the live indicator preview for one underlying: the same
+// VWAP/EMA/RSI/MACD as the entry rules, but on [...closed 5m bars, the
+// forming bar] so the card shows where the indicators stand right now.
+// Display only — it never gates an entry, which still needs a closed bar.
+function updateLiveValues(state, id) {
+  if (!state.bars5) state.bars5 = {};
+  if (!state.formingBar) state.formingBar = {};
+  if (!state.liveValues) state.liveValues = {};
+  const bars5 = state.bars5[id];
+  const forming = state.formingBar[id];
+  if (!bars5 || bars5.length < 60 || !forming) return;
+  const live = indicatorValues([...bars5, forming]);
+  if (live) {
+    state.liveValues[id] = live;
+    if (state.lastCards[id]) state.lastCards[id].live = live;
+  }
+}
+
 async function tick(state, api, nowMs) {
   const p = istParts(nowMs);
   const mins = p.hour * 60 + p.minute;
@@ -434,6 +453,7 @@ async function tick(state, api, nowMs) {
     const prevBar = state.lastBar[s.id];
     state.lastBar[s.id] = s.asOf;
     state.lastCards[s.id] = s;
+    if (s.bars5) { if (!state.bars5) state.bars5 = {}; state.bars5[s.id] = s.bars5; }
     if (s.asOf === prevBar) continue; // same 5m bar — nothing new to act on
     log(state, `${s.id}: ${s.status === 'trade' ? `TRADE ${s.card.ticker} ${s.score.score}/100` : s.status === 'no-trade' ? 'no setup' : s.status} (new 5m bar ${s.asOf})`);
     if (s.status !== 'trade') continue;
@@ -441,6 +461,18 @@ async function tick(state, api, nowMs) {
     if (state.tradedToday.has(`${s.card.ticker}|${s.card.expiry}`)) continue;
     if (state.positions.live.concat(state.positions.paper).some((pos) => pos.status === 'OPEN' && pos.ticker === s.card.ticker && pos.expiry === s.card.expiry)) continue;
     await enterTrade(state, api, s, nowMs);
+  }
+
+  // Live indicator preview: refresh the forming 5m bar from REST and
+  // recompute the indicators on it. The feed then moves the forming bar
+  // tick by tick in onQuote until the next 30s refresh.
+  for (const symbol of UNDERLYINGS) {
+    if (!state.formingBar) state.formingBar = {};
+    try {
+      const forming = await api.getFormingBar(symbol.upstoxKey, 5);
+      if (forming) state.formingBar[symbol.id] = forming;
+    } catch (_) { /* keep the last forming bar */ }
+    updateLiveValues(state, symbol.id);
   }
 
   await monitorPositions(state, api, nowMs);
@@ -553,6 +585,15 @@ async function main() {
       if (q.instrumentKey === 'NSE_INDEX|Nifty 50' || q.instrumentKey === 'NSE_INDEX|Nifty Bank') {
         state.indexLtps.set(q.instrumentKey, q.ltp);
       }
+      // Move the forming 5m bar with the live price; the indicator
+      // preview is recomputed from it on the throttled re-render below.
+      const symbol = UNDERLYINGS.find((u) => u.upstoxKey === q.instrumentKey);
+      if (symbol && state.formingBar[symbol.id]) {
+        const f = state.formingBar[symbol.id];
+        f.close = q.ltp;
+        if (q.ltp > f.high) f.high = q.ltp;
+        if (q.ltp < f.low) f.low = q.ltp;
+      }
       const pos = [...state.positions.live, ...state.positions.paper]
         .find((p) => p.status === 'OPEN' && p.instrumentKey === q.instrumentKey);
       if (pos) {
@@ -562,6 +603,7 @@ async function main() {
       }
       if (process.stdout.isTTY && Date.now() - (state.lastRenderMs || 0) > 1000) {
         state.lastRenderMs = Date.now();
+        for (const symbol of UNDERLYINGS) updateLiveValues(state, symbol.id);
         render(state, Date.now());
       }
     },
@@ -586,6 +628,9 @@ async function main() {
     lastBar: {},
     lastCards: {},
     warmBook: {},
+    bars5: {},
+    formingBar: {},
+    liveValues: {},
     log: [],
     printedLog: 0,
     lastRenderMs: 0,
@@ -655,4 +700,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { tick, enterTrade, monitorPositions, squareOffAll, checkPositionQuote, warmLiquidityBand, marketOpen, render, daySummary };
+module.exports = { tick, enterTrade, monitorPositions, squareOffAll, checkPositionQuote, warmLiquidityBand, updateLiveValues, marketOpen, render, daySummary };

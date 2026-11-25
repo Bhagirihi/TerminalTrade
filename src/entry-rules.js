@@ -95,7 +95,29 @@ function entryTypeFor(s, bars, o, side) {
   return bars[i].high >= vwap - tol && bars[i].close < vwap ? 'retest' : 'breakout';
 }
 
-// Evaluate the last closed 5m bar. Returns:
+// Indicator readings at the last bar of `bars` — the same values
+// evaluateEntry reports. The live preview calls this on
+// [...closedBars, formingBar]; entries never do (closed bars only).
+function indicatorValues(bars, opts = {}) {
+  const o = { ...DEFAULTS, ...opts };
+  if (!Array.isArray(bars) || bars.length < o.minBars) return null;
+  const s = computeSeries(bars, o);
+  const i = bars.length - 1;
+  const bar = bars[i];
+  return {
+    close: bar.close,
+    vwap: s.vwap[i],
+    emaFast: s.emaFast[i],
+    emaSlow: s.emaSlow[i],
+    rsi: s.rsi[i],
+    macdLine: s.macd.line[i],
+    macdSignal: s.macd.signal[i],
+    macdHist: s.macd.hist[i],
+    prevMacdHist: i > 0 ? s.macd.hist[i - 1] : NaN,
+    volume: bar.volume,
+    volMa: s.volMa[i],
+  };
+}
 //   { evaluable, side: 'CE' | 'PE' | null, passed, entryType,
 //     conditions, conditionsBySide, values, reason? }
 // side is null when neither side's five conditions all hold (including when
@@ -115,20 +137,7 @@ function evaluateEntry(bars5, opts = {}) {
   }
   const s = computeSeries(bars5, o);
   const i = bars5.length - 1;
-  const bar = bars5[i];
-  const values = {
-    close: bar.close,
-    vwap: s.vwap[i],
-    emaFast: s.emaFast[i],
-    emaSlow: s.emaSlow[i],
-    rsi: s.rsi[i],
-    macdLine: s.macd.line[i],
-    macdSignal: s.macd.signal[i],
-    macdHist: s.macd.hist[i],
-    prevMacdHist: i > 0 ? s.macd.hist[i - 1] : NaN,
-    volume: bar.volume,
-    volMa: s.volMa[i],
-  };
+  const values = indicatorValues(bars5, o);
   for (const side of ['CE', 'PE']) {
     const conditions = sideConditions(s, bars5, o, side, i);
     if (allTrue(conditions)) {
@@ -157,4 +166,4 @@ function evaluateEntry(bars5, opts = {}) {
   };
 }
 
-module.exports = { evaluateEntry, DEFAULTS };
+module.exports = { evaluateEntry, indicatorValues, DEFAULTS };
