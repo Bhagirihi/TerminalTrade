@@ -1,0 +1,13 @@
+{
+  "name": "terminaltrade",
+  "version": "1.0.0",
+  "description": "TerminalTrade V3 — starting with the Upstox login (same OAuth flow as main). Run: npm run login",
+  "private": true,
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "login": "node tools/upstox-login.js"
+  }
+}
