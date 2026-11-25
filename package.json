@@ -8,6 +8,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "login": "node tools/upstox-login.js"
+    "login": "node tools/upstox-login.js",
+    "start": "node tools/start.js"
   }
 }
