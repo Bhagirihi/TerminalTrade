@@ -26,6 +26,7 @@ const { suggestAll, formatSuggestion } = require('../src/suggest');
 const { loadPaperTrades, savePaperTrades, recordPaperTrade, hasOpenTradeFor, closePaperTrade } = require('../src/paper');
 const { loadLiveTrades, saveLiveTrades, recordLiveTrade, placeLiveEntry, syncLivePositions, exitLivePosition } = require('../src/trading');
 const { optionsNetPnl } = require('../src/charges');
+const { MarketFeed } = require('../src/market-feed');
 const { istDateKey, istParts, istTimeSecStr, istFullSecStr } = require('../src/time');
 
 const POLL_MS = 30000;
@@ -107,8 +108,9 @@ function positionLines(state) {
 }
 
 function render(state, nowMs) {
+  const feedStatus = !state.feed ? 'off' : state.feed.isLive() ? 'live' : 'down';
   const header = [
-    `V3 WATCH — ${state.mode} · budget ${state.budget != null ? `₹${inr(state.budget)}` : 'uncapped'} · spent ₹${inr(state.spent)} · left ${state.remaining != null ? `₹${inr(state.remaining)}` : '—'} · ${istTimeSecStr(nowMs)} IST`,
+    `V3 WATCH — ${state.mode} · budget ${state.budget != null ? `₹${inr(state.budget)}` : 'uncapped'} · spent ₹${inr(state.spent)} · left ${state.remaining != null ? `₹${inr(state.remaining)}` : '—'} · feed ${feedStatus} · ${istTimeSecStr(nowMs)} IST`,
     state.funds
       ? `Upstox funds — available ₹${inr(state.funds.available)} · used ₹${inr(state.funds.used)} · total ₹${inr(state.funds.available + state.funds.used)}`
       : 'Upstox funds — unavailable',
@@ -160,6 +162,7 @@ async function enterTrade(state, api, s, nowMs) {
     state.positions.paper.push(trade);
     state.spent = +(state.spent + trade.totalCost).toFixed(2);
     if (state.remaining != null) state.remaining = Math.max(0, +(state.remaining - trade.totalCost).toFixed(2));
+    if (state.feed) state.feed.subscribe([trade.instrumentKey]);
     log(state, `PAPER BUY ${trade.ticker} ${trade.lots} lot${trade.lots > 1 ? 's' : ''} @ ₹${trade.entry} (total ₹${inr(trade.totalCost)})`);
     return;
   }
@@ -195,6 +198,7 @@ async function enterTrade(state, api, s, nowMs) {
     state.positions.live.push(trade);
     state.spent = +(state.spent + trade.totalCost).toFixed(2);
     if (state.remaining != null) state.remaining = Math.max(0, +(state.remaining - trade.totalCost).toFixed(2));
+    if (state.feed) state.feed.subscribe([trade.instrumentKey]);
     log(state, `LIVE BUY ${trade.ticker} ${trade.lots} lot${trade.lots > 1 ? 's' : ''} @ ₹${trade.entry} (order ${trade.buyOrderId}, total ₹${inr(trade.totalCost)})${trade.slmOrderId ? ` — SL-M ${trade.slmOrderId}` : ' — SL-M FAILED, loop monitor is the only stop'}`);
   } catch (e) {
     log(state, `LIVE BUY FAILED ${s.card.ticker}: ${e.message || e} — no position taken`);
@@ -202,82 +206,124 @@ async function enterTrade(state, api, s, nowMs) {
   }
 }
 
+function maybeUnsubscribe(state, key) {
+  if (!state.feed) return;
+  const stillOpen = [...state.positions.live, ...state.positions.paper]
+    .some((p) => p.status === 'OPEN' && p.instrumentKey === key);
+  if (!stillOpen) state.feed.unsubscribe([key]);
+}
+
+// Check one open position against a fresh LTP — from a feed tick (realtime)
+// or the 30s REST poll. Exits at SL/T2, notes T1. Guarded by pos.exiting
+// so a feed tick and the poll can't both sell the same position.
+async function checkPositionQuote(state, api, pos, kind, ltp, nowMs) {
+  if (pos.status !== 'OPEN' || pos.exiting) return;
+  pos.liveLtp = ltp;
+  if (ltp >= pos.t1 && !pos.t1Hit) {
+    pos.t1Hit = true;
+    log(state, `${kind} ${pos.ticker} T1 hit @ ₹${ltp}`);
+  }
+  const saveLedger = () => {
+    if (kind === 'PAPER') savePaperTrades(loadPaperTrades().map((t) => {
+      const cur = state.positions.paper.find((p) => p.id === t.id);
+      return cur || t;
+    }));
+    else saveLiveTrades(loadLiveTrades().map((t) => {
+      const cur = state.positions.live.find((p) => p.id === t.id);
+      return cur || t;
+    }));
+  };
+  if (kind === 'PAPER') {
+    if (ltp <= pos.sl) {
+      closePaperTrade(pos, pos.sl, 'SL', nowMs);
+      log(state, `PAPER ${pos.ticker} closed SL @ ₹${pos.exit} — net ₹${inr(pos.netPnl)}`);
+      saveLedger();
+      maybeUnsubscribe(state, pos.instrumentKey);
+    } else if (ltp >= pos.t2) {
+      closePaperTrade(pos, pos.t2, 'T2', nowMs);
+      log(state, `PAPER ${pos.ticker} closed T2 @ ₹${pos.exit} — net ₹${inr(pos.netPnl)}`);
+      saveLedger();
+      maybeUnsubscribe(state, pos.instrumentKey);
+    }
+    return;
+  }
+  // LIVE
+  if (ltp >= pos.t2) {
+    pos.exiting = true;
+    try {
+      const r = await exitLivePosition(api, pos, 'T2', pos.t2);
+      if (r.ok) {
+        log(state, `LIVE ${pos.ticker} closed T2 @ ₹${r.exit} — net ₹${inr(pos.netPnl)}`);
+        saveLedger();
+        maybeUnsubscribe(state, pos.instrumentKey);
+      } else {
+        log(state, `LIVE ${pos.ticker} T2 exit skipped: ${r.reason}`);
+        pos.exiting = false;
+      }
+    } catch (e) {
+      log(state, `LIVE ${pos.ticker} T2 exit FAILED: ${e.message || e} — position still open`);
+      pos.exiting = false;
+    }
+  } else if (ltp <= pos.sl && !pos.slmOrderId) {
+    // No broker stop exists (SL-M placement failed) — the loop is the
+    // only stop, so sell at market now.
+    pos.exiting = true;
+    try {
+      const r = await exitLivePosition(api, pos, 'SL', pos.sl);
+      if (r.ok) {
+        log(state, `LIVE ${pos.ticker} closed SL @ ₹${r.exit} — net ₹${inr(pos.netPnl)} (no SL-M existed)`);
+        saveLedger();
+        maybeUnsubscribe(state, pos.instrumentKey);
+      } else {
+        log(state, `LIVE ${pos.ticker} SL exit skipped: ${r.reason}`);
+        pos.exiting = false;
+      }
+    } catch (e) {
+      log(state, `LIVE ${pos.ticker} SL exit FAILED: ${e.message || e} — position still open`);
+      pos.exiting = false;
+    }
+  }
+}
+
 async function monitorPositions(state, api, nowMs) {
   const open = [...state.positions.live, ...state.positions.paper];
   if (!open.length) return;
-  let ltps = new Map();
-  try { ltps = await api.getLtps(open.map((p) => p.instrumentKey)); } catch (_) { /* positions show without live prices */ }
 
   // Live: the broker SL-M is the stop — detect its fill first.
   if (state.positions.live.length) {
     try {
       const closed = await syncLivePositions(api, state.positions.live);
-      for (const c of closed) log(state, `LIVE ${c.ticker} closed SL-M @ ₹${c.exit} — net ₹${inr(c.netPnl)}`);
+      for (const c of closed) {
+        log(state, `LIVE ${c.ticker} closed SL-M @ ₹${c.exit} — net ₹${inr(c.netPnl)}`);
+        maybeUnsubscribe(state, c.instrumentKey);
+      }
     } catch (e) {
       log(state, `live SL-M sync failed: ${e.message || e}`);
     }
   }
 
-  let paperChanged = false;
-  let liveChanged = false;
-  for (const pos of state.positions.paper) {
-    if (pos.status !== 'OPEN') continue;
-    const ltp = ltps.get(pos.instrumentKey);
-    if (!Number.isFinite(ltp)) continue;
-    pos.liveLtp = ltp;
-    if (ltp >= pos.t1 && !pos.t1Hit) { pos.t1Hit = true; log(state, `PAPER ${pos.ticker} T1 hit @ ₹${ltp}`); }
-    if (ltp <= pos.sl) {
-      closePaperTrade(pos, pos.sl, 'SL', nowMs);
-      log(state, `PAPER ${pos.ticker} closed SL @ ₹${pos.exit} — net ₹${inr(pos.netPnl)}`);
-      paperChanged = true;
-    } else if (ltp >= pos.t2) {
-      closePaperTrade(pos, pos.t2, 'T2', nowMs);
-      log(state, `PAPER ${pos.ticker} closed T2 @ ₹${pos.exit} — net ₹${inr(pos.netPnl)}`);
-      paperChanged = true;
+  // Fresh LTPs: feed first (realtime), REST batch fills any gaps.
+  let ltps = new Map();
+  if (state.feed && state.feed.isLive()) {
+    for (const p of open) {
+      const q = state.feed.getQuote(p.instrumentKey);
+      if (q) ltps.set(p.instrumentKey, q.ltp);
     }
+  }
+  if (ltps.size < open.length) {
+    try {
+      const rest = await api.getLtps(open.map((p) => p.instrumentKey));
+      for (const [k, v] of rest) if (!ltps.has(k)) ltps.set(k, v);
+    } catch (_) { /* positions show without live prices */ }
+  }
+  for (const pos of state.positions.paper) {
+    const ltp = ltps.get(pos.instrumentKey);
+    if (Number.isFinite(ltp)) await checkPositionQuote(state, api, pos, 'PAPER', ltp, nowMs);
   }
   for (const pos of state.positions.live) {
-    if (pos.status !== 'OPEN') continue;
     const ltp = ltps.get(pos.instrumentKey);
-    if (!Number.isFinite(ltp)) continue;
-    pos.liveLtp = ltp;
-    if (ltp >= pos.t1 && !pos.t1Hit) { pos.t1Hit = true; log(state, `LIVE ${pos.ticker} T1 hit @ ₹${ltp}`); }
-    if (ltp >= pos.t2) {
-      try {
-        const r = await exitLivePosition(api, pos, 'T2', pos.t2);
-        if (r.ok) {
-          log(state, `LIVE ${pos.ticker} closed T2 @ ₹${r.exit} — net ₹${inr(pos.netPnl)}`);
-          liveChanged = true;
-        } else {
-          log(state, `LIVE ${pos.ticker} T2 exit skipped: ${r.reason}`);
-        }
-      } catch (e) {
-        log(state, `LIVE ${pos.ticker} T2 exit FAILED: ${e.message || e} — position still open`);
-      }
-    } else if (ltp <= pos.sl && !pos.slmOrderId) {
-      // No broker stop exists (SL-M placement failed) — the loop is the
-      // only stop, so sell at market now.
-      try {
-        const r = await exitLivePosition(api, pos, 'SL', pos.sl);
-        if (r.ok) {
-          log(state, `LIVE ${pos.ticker} closed SL @ ₹${r.exit} — net ₹${inr(pos.netPnl)} (no SL-M existed)`);
-          liveChanged = true;
-        } else {
-          log(state, `LIVE ${pos.ticker} SL exit skipped: ${r.reason}`);
-        }
-      } catch (e) {
-        log(state, `LIVE ${pos.ticker} SL exit FAILED: ${e.message || e} — position still open`);
-      }
-    }
+    if (Number.isFinite(ltp)) await checkPositionQuote(state, api, pos, 'LIVE', ltp, nowMs);
   }
-  if (paperChanged) savePaperTrades(loadPaperTrades().map((t) => {
-    const open = state.positions.paper.find((p) => p.id === t.id);
-    return open || t;
-  }));
-  if (liveChanged) saveLiveTrades(loadLiveTrades().map((t) => {
-    const open = state.positions.live.find((p) => p.id === t.id);
-    return open || t;
-  }));
 }
 
 // Square off every open position (15:15, or when the loop stops).
@@ -290,6 +336,7 @@ async function squareOffAll(state, api, nowMs) {
       if (r.ok) {
         log(state, `LIVE ${pos.ticker} squared off @ ₹${r.exit} — net ₹${inr(pos.netPnl)}`);
         liveChanged = true;
+        maybeUnsubscribe(state, pos.instrumentKey);
       } else log(state, `LIVE ${pos.ticker} square-off skipped: ${r.reason} — STILL OPEN, check Upstox`);
     } catch (e) {
       log(state, `LIVE ${pos.ticker} square-off FAILED: ${e.message || e} — STILL OPEN, check Upstox`);
@@ -301,6 +348,7 @@ async function squareOffAll(state, api, nowMs) {
     closePaperTrade(pos, Number.isFinite(pos.liveLtp) ? pos.liveLtp : pos.entry, '15:15', nowMs);
     log(state, `PAPER ${pos.ticker} squared off @ ₹${pos.exit} — net ₹${inr(pos.netPnl)}`);
     paperChanged = true;
+    maybeUnsubscribe(state, pos.instrumentKey);
   }
   if (liveChanged) saveLiveTrades(loadLiveTrades().map((t) => {
     const cur = state.positions.live.find((p) => p.id === t.id);
@@ -319,9 +367,21 @@ async function tick(state, api, nowMs) {
   if (mins >= CLOSE_MIN) return 'done';
   const today = istDateKey(nowMs);
 
-  try {
-    state.indexLtps = await api.getLtps(['NSE_INDEX|Nifty 50', 'NSE_INDEX|Nifty Bank']);
-  } catch (_) { /* header keeps the last levels */ }
+  // Index levels: realtime feed first, REST fills any gaps.
+  let indexLtps = new Map();
+  if (state.feed && state.feed.isLive()) {
+    for (const k of ['NSE_INDEX|Nifty 50', 'NSE_INDEX|Nifty Bank']) {
+      const q = state.feed.getQuote(k);
+      if (q) indexLtps.set(k, q.ltp);
+    }
+  }
+  if (indexLtps.size < 2) {
+    try {
+      const rest = await api.getLtps(['NSE_INDEX|Nifty 50', 'NSE_INDEX|Nifty Bank']);
+      for (const [k, v] of rest) if (!indexLtps.has(k)) indexLtps.set(k, v);
+    } catch (_) { /* header keeps the last levels */ }
+  }
+  state.indexLtps = indexLtps;
 
   let suggestions = [];
   try {
@@ -434,13 +494,41 @@ async function main() {
     : 'Paper trading only — no live orders placed. Run `npm run paper` to see how they did.');
 
   const today = istDateKey(nowMs);
-  const state = {
+
+  // Realtime price feed (Upstox websocket v3). Best effort — if it never
+  // connects, the loop falls back to REST LTP polling and keeps working.
+  // onQuote checks open positions on the tick that crosses SL/T2 and
+  // re-renders the screen (throttled to 1/s) so prices move live.
+  let state = null;
+  const feed = new MarketFeed({
+    token: creds.accessToken,
+    onQuote: (q) => {
+      if (!state) return;
+      const pos = [...state.positions.live, ...state.positions.paper]
+        .find((p) => p.status === 'OPEN' && p.instrumentKey === q.instrumentKey);
+      if (pos) {
+        const kind = state.positions.live.includes(pos) ? 'LIVE' : 'PAPER';
+        checkPositionQuote(state, api, pos, kind, q.ltp, Date.now())
+          .catch((e) => log(state, `quote check failed: ${e.message || e}`));
+      }
+      if (process.stdout.isTTY && Date.now() - (state.lastRenderMs || 0) > 1000) {
+        state.lastRenderMs = Date.now();
+        render(state, Date.now());
+      }
+    },
+    onStatus: (msg) => { if (state) log(state, msg); },
+  });
+  feed.start();
+  feed.subscribe(['NSE_INDEX|Nifty 50', 'NSE_INDEX|Nifty Bank']);
+
+  state = {
     mode,
     budget,
     remaining: budget,
     spent: 0,
     funds,
     indexLtps,
+    feed,
     positions: {
       live: loadLiveTrades().filter((t) => t.status === 'OPEN' && t.date === today),
       paper: loadPaperTrades().filter((t) => t.status === 'OPEN' && t.date === today),
@@ -450,6 +538,7 @@ async function main() {
     lastCards: {},
     log: [],
     printedLog: 0,
+    lastRenderMs: 0,
   };
   for (const t of [...state.positions.live, ...state.positions.paper]) {
     state.tradedToday.add(`${t.ticker}|${t.expiry}`);
@@ -458,11 +547,13 @@ async function main() {
   }
   if (state.positions.live.length || state.positions.paper.length) {
     log(state, `Resumed ${state.positions.live.length} live + ${state.positions.paper.length} paper open position(s) from today.`);
+    feed.subscribe([...state.positions.live, ...state.positions.paper].map((t) => t.instrumentKey));
   }
 
   if (once) {
     await tick(state, api, Date.now());
     console.log(daySummary(state));
+    feed.stop();
     return;
   }
 
@@ -481,6 +572,7 @@ async function main() {
   await squareOffAll(state, api, Date.now());
   render(state, Date.now());
   console.log(daySummary(state));
+  feed.stop();
 }
 
 if (require.main === module) {
@@ -490,4 +582,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { tick, enterTrade, monitorPositions, squareOffAll, marketOpen, render, daySummary };
+module.exports = { tick, enterTrade, monitorPositions, squareOffAll, checkPositionQuote, marketOpen, render, daySummary };
