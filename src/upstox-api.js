@@ -122,14 +122,45 @@ class UpstoxApi {
 
   // Last traded price for one instrument key.
   async getLtp(instrumentKey) {
-    const j = await this.fetchJson(
-      `${BASE}/v2/market-quote/ltp?instrument_key=${encodeURIComponent(instrumentKey)}`
-    );
-    const data = (j && j.data) || {};
-    const entry = Object.values(data)[0];
-    const px = entry && Number(entry.last_price);
+    const book = await this.getLtps([instrumentKey]);
+    const px = book.get(instrumentKey);
     if (!Number.isFinite(px)) throw new Error('Upstox LTP: empty response');
     return px;
+  }
+
+  // Last traded price for many keys. Upstox accepts a comma-separated list.
+  // Returns a Map of instrument key -> last_price (same shape as main).
+  async getLtps(instrumentKeys) {
+    const unique = [...new Set((instrumentKeys || []).filter(Boolean).map(String))];
+    const out = new Map();
+    if (!unique.length) return out;
+    const key = unique.map((item) => encodeURIComponent(item)).join(',');
+    const j = await this.fetchJson(`${BASE}/v2/market-quote/ltp?instrument_key=${key}`);
+    const data = (j && j.data) || {};
+    const entries = Object.values(data);
+    for (const value of entries) {
+      const token = value && (value.instrument_token || value.instrument_key);
+      const px = value && Number(value.last_price);
+      if (token && Number.isFinite(px)) out.set(String(token), px);
+    }
+    if (unique.length === 1 && entries.length === 1) {
+      const px = Number(entries[0] && entries[0].last_price);
+      if (Number.isFinite(px)) out.set(unique[0], px);
+    }
+    return out;
+  }
+
+  // Equity funds for live buys (same endpoint and shape as main's getFunds).
+  async getFunds() {
+    const j = await this.fetchJson(`${BASE}/v2/user/get-funds-and-margin`);
+    const eq = (j && j.data && j.data.equity) || {};
+    const available = Number(eq.available_margin);
+    const used = Number(eq.used_margin);
+    return {
+      available: Number.isFinite(available) ? available : 0,
+      used: Number.isFinite(used) ? used : 0,
+      payin: Number(eq.payin_amount) || 0,
+    };
   }
 }
 

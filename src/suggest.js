@@ -212,34 +212,33 @@ function entrySummary(entry) {
 }
 
 // The whole point of this layout: the verdict first, then only the detail
-// that explains it. A trade shows the card up top; a no-trade shows the
-// closest side and why it fell short, in plain words.
+// that explains it, inside a bordered card. A trade shows the card up top;
+// a no-trade shows the closest side and why it fell short, in plain words.
 function formatSuggestion(s) {
-  const lines = [];
-  const head = [`== ${s.id} ==`];
-  if (s.asOf) head.push(s.asOf.replace(' IST', ''));
+  const titleParts = [s.id];
+  if (s.asOf) titleParts.push(s.asOf.slice(11)); // "12:45 IST"
   if (s.regime && s.regime.evaluable) {
-    head.push(`${s.regime.label} (ADX ${fmt(+s.regime.features.adx.toFixed(1))})`);
+    titleParts.push(`${s.regime.label} (ADX ${fmt(+s.regime.features.adx.toFixed(1))})`);
   }
-  lines.push(term.cyan(head.join('  ·  ')));
-  lines.push('');
+  const title = term.cyan(term.bold(titleParts.join(' \u00b7 ')));
+  const lines = [];
   if (s.status === 'error') {
-    lines.push(term.red(`  ✗ Error — ${s.reason || 'failed'}`));
-    return lines.join('\n');
+    lines.push(term.red(`\u2717 Error \u2014 ${s.reason || 'failed'}`));
+    return term.card(title, lines);
   }
   if (s.status === 'no-data') {
-    lines.push(term.yellow(`  — ${s.reason || 'no data'}`));
-    return lines.join('\n');
+    lines.push(term.yellow(`\u2014 ${s.reason || 'no data'}`));
+    return term.card(title, lines);
   }
   if (s.status === 'trade') {
     const c = s.card;
-    lines.push(term.green(term.bold(`  ✓ TRADE: BUY ${c.ticker} — expiry ${c.expiry}, lot ${c.lot}`)));
-    lines.push(`    Entry ₹${c.ltp}  ·  SL ₹${c.sl} (-${SL_PCT}%)  ·  T1 ₹${c.t1} (+${T1_PCT}%)  ·  T2 ₹${c.t2} (+${T2_PCT}%)`);
-    lines.push(`    Cost/lot ₹${c.costPerLot}  ·  max loss/lot ₹${c.maxLossPerLot}`);
+    lines.push(term.green(term.bold(`\u2713 TRADE: BUY ${c.ticker} \u2014 expiry ${c.expiry}, lot ${c.lot}`)));
+    lines.push(`  Entry \u20b9${c.ltp}  \u00b7  SL \u20b9${c.sl} (-${SL_PCT}%)  \u00b7  T1 \u20b9${c.t1} (+${T1_PCT}%)  \u00b7  T2 \u20b9${c.t2} (+${T2_PCT}%)`);
+    lines.push(`  Cost/lot \u20b9${c.costPerLot}  \u00b7  max loss/lot \u20b9${c.maxLossPerLot}`);
     lines.push('');
-    lines.push(`  Score ${s.score.score}/${s.score.max} (${s.score.verdict}) — ${scoreSummary(s.score)}`);
-    lines.push(`  ${term.green('✓')} All 5 ${s.entry.side} checks passed — ${entrySummary(s.entry)}`);
-    return lines.join('\n');
+    lines.push(`Score ${s.score.score}/${s.score.max} (${s.score.verdict}) \u2014 ${scoreSummary(s.score)}`);
+    lines.push(`${term.green('\u2713')} All 5 ${s.entry.side} checks passed \u2014 ${entrySummary(s.entry)}`);
+    return term.card(title, lines);
   }
   // No trade.
   if (s.entry && !s.entry.passed) {
@@ -248,19 +247,19 @@ function formatSuggestion(s) {
     const passed = Object.values(conds).filter(Boolean).length;
     const failed = CHECK_KEYS.filter((k) => !conds[k]);
     const reason = failed.map((k) => checkReason(side, k, s.entry.values)).join('; ');
-    lines.push(term.yellow(term.bold(`  ✗ NO TRADE — ${side} was ${passed} of 5 checks; ${reason}.`)));
+    lines.push(term.yellow(term.bold(`\u2717 NO TRADE \u2014 ${side} was ${passed} of 5 checks; ${reason}.`)));
     lines.push(...formatEntryChecksSide(s.entry, side));
-    return lines.join('\n');
+    return term.card(title, lines);
   }
   // Entry passed but the score is below the 70 bar.
   const missed = s.score.checks.filter((c) => c.status === 'fail');
-  lines.push(term.yellow(term.bold(`  ✗ NO TRADE — ${s.entry.side} setup found, but score ${s.score.score}/${s.score.max} is below the 70 bar.`)));
+  lines.push(term.yellow(term.bold(`\u2717 NO TRADE \u2014 ${s.entry.side} setup found, but score ${s.score.score}/${s.score.max} is below the 70 bar.`)));
   if (missed.length) {
-    lines.push(`  Missed: ${missed.map((c) => c.label.toLowerCase()).join('; ')}.`);
+    lines.push(`Missed: ${missed.map((c) => c.label.toLowerCase()).join('; ')}.`);
   }
-  lines.push(`  Score ${s.score.score}/${s.score.max} (${s.score.verdict}) — ${scoreSummary(s.score)}`);
-  lines.push(`  ${term.green('✓')} All 5 ${s.entry.side} checks passed — ${entrySummary(s.entry)}`);
-  return lines.join('\n');
+  lines.push(`Score ${s.score.score}/${s.score.max} (${s.score.verdict}) \u2014 ${scoreSummary(s.score)}`);
+  lines.push(`${term.green('\u2713')} All 5 ${s.entry.side} checks passed \u2014 ${entrySummary(s.entry)}`);
+  return term.card(title, lines);
 }
 
 module.exports = { suggestFor, suggestAll, formatSuggestion, loadOptionBook, UNDERLYINGS, SL_PCT, T1_PCT, T2_PCT };
