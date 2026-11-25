@@ -7,8 +7,14 @@
 //
 // Tests: (1) auth, (2) 370-day daily candles + today's-partial-bar behaviour,
 // (3) 15m month, (4) 1m single day (first/last bar times), (5) 1m month range
-// (truncation?), (6) expired weekly option contract candles — the decisive test
-// for the options lane, (7) split/bonus scan across the 33 fixed names.
+// (truncation?), (6) expired weekly option contract candles for NIFTY and
+// BANKNIFTY — the decisive test for the options lane, (7) split/bonus scan
+// across the 33 fixed names, (8) expired monthly futures candles (NIFTY +
+// BANKNIFTY).
+//
+// Expiries are read from the NSE master itself, never assumed from a weekday:
+// NSE moved the NIFTY weekly expiry (Thursday → Monday, Oct 2025), so a
+// hardcoded weekday would pick the wrong contract.
 
 const fs = require('fs');
 const path = require('path');
@@ -22,6 +28,10 @@ const CACHE = path.join(__dirname, '..', 'cache', 'muhurat-backtest');
 const NSE_MASTER = 'https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz';
 const SBIN = CORE.find((c) => c.ticker === 'SBIN');
 const NIFTY_INDEX_KEY = 'NSE_INDEX|Nifty 50';
+const UNDERLYINGS = [
+  { name: 'NIFTY', indexKey: 'NSE_INDEX|Nifty 50' },
+  { name: 'BANKNIFTY', indexKey: 'NSE_INDEX|Nifty Bank' },
+];
 
 function shiftDays(dateKey, days) {
   const [y, m, d] = dateKey.split('-').map(Number);
@@ -54,12 +64,78 @@ async function fetchNseMaster() {
   return Array.isArray(rows) ? rows : [];
 }
 
-// Last Thursday on or before the given date (NIFTY weekly expiry).
-function lastThursdayOnOrBefore(dateKey) {
-  const [y, m, d] = dateKey.split('-').map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d));
-  while (dt.getUTCDay() !== 4) dt.setUTCDate(dt.getUTCDate() - 1);
-  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+// --- NSE master helpers (pure; unit-tested) --------------------------------
+// Expiry dates in the master are the source of truth — weekly expiry weekdays
+// change (NIFTY weekly moved Thursday → Monday in Oct 2025), so never assume
+// one. `name` is 'NIFTY' or 'BANKNIFTY'.
+
+function expiryList(master, name) {
+  const set = new Set();
+  for (const r of master) {
+    const nm = String(r.name || '').toUpperCase();
+    const sym = String(r.tradingsymbol || r.trading_symbol || '').toUpperCase();
+    if (nm !== name && !symbolFor(name, sym)) continue;
+    const exp = String(r.expiry || '').slice(0, 10);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(exp)) set.add(exp);
+  }
+  return [...set].sort();
+}
+
+function expiryOnOrBefore(expiries, target) {
+  let best = null;
+  for (const e of expiries) {
+    if (e <= target) best = e;
+    else break;
+  }
+  return best;
+}
+
+function strikeOf(r) {
+  return Number(r.strike_price != null ? r.strike_price : r.strike);
+}
+
+function symbolOf(r) {
+  return String(r.tradingsymbol || r.trading_symbol || '');
+}
+
+// Symbol belongs to `name` when it starts with the name followed by a digit
+// (the expiry year, e.g. NIFTY26AUG25700CE). A bare startsWith would also
+// match NIFTYIT / NIFTYMIDCAP, and 'BANKNIFTY…' contains 'NIFTY' as a
+// substring, so neither a loose prefix nor includes() is safe.
+function symbolFor(name, sym) {
+  return sym.startsWith(name) && /\d/.test(sym[name.length] || '');
+}
+
+function optionContracts(master, name, expiry) {
+  return master.filter((r) => {
+    const sym = symbolOf(r);
+    const nm = String(r.name || '');
+    const type = String(r.instrument_type || '');
+    return String(r.instrument_key || '').startsWith('NSE_FO')
+      && String(r.expiry || '').slice(0, 10) === expiry
+      && (symbolFor(name, sym) || nm.toUpperCase() === name)
+      && (type === 'CE' || type === 'PE' || /CE$/.test(sym) || /PE$/.test(sym));
+  });
+}
+
+function futureContracts(master, name, expiry) {
+  return master.filter((r) => {
+    const sym = symbolOf(r);
+    const nm = String(r.name || '');
+    const type = String(r.instrument_type || '');
+    return String(r.instrument_key || '').startsWith('NSE_FO')
+      && String(r.expiry || '').slice(0, 10) === expiry
+      && (symbolFor(name, sym) || nm.toUpperCase() === name)
+      && (type === 'FUT' || /FUT$/.test(sym));
+  });
+}
+
+function pickAtmCe(contracts, close) {
+  const withStrike = contracts.filter((r) => Number.isFinite(strikeOf(r)));
+  if (!withStrike.length) return null;
+  withStrike.sort((a, b) => Math.abs(strikeOf(a) - close) - Math.abs(strikeOf(b) - close));
+  return withStrike.find((r) => String(r.instrument_type || '').includes('CE') || /CE$/.test(symbolOf(r)))
+    || withStrike[0];
 }
 
 async function main() {
@@ -171,57 +247,56 @@ async function main() {
   }
 
   // 6. Expired weekly option contract candles — decisive for the options lane.
+  // Expiry comes from the master (nearest expiry on/before ~90 days ago),
+  // for NIFTY and BANKNIFTY separately.
+  let master = null;
   try {
-    const expiry = lastThursdayOnOrBefore(shiftDays(today, -90));
-    const master = await fetchNseMaster();
-    const niftyDaily = await provider.getDailyCandles(NIFTY_INDEX_KEY, shiftDays(expiry, -3), expiry);
-    const closeAtExpiry = niftyDaily.length ? niftyDaily[niftyDaily.length - 1].close : null;
-    const isNiftyOpt = (r) => {
-      const sym = String(r.tradingsymbol || r.trading_symbol || '');
-      const name = String(r.name || '');
-      const type = String(r.instrument_type || '');
-      return (
-        String(r.instrument_key || '').startsWith('NSE_FO')
-        && String(r.expiry || '').slice(0, 10) === expiry
-        && (sym.includes('NIFTY') || name.toUpperCase() === 'NIFTY')
-        && (type === 'CE' || type === 'PE' || /CE$/.test(sym) || /PE$/.test(sym))
-      );
-    };
-    const opts = master.filter(isNiftyOpt);
-    let picked = null;
-    if (closeAtExpiry != null && opts.length) {
-      const strikeOf = (r) => Number(r.strike_price != null ? r.strike_price : r.strike);
-      const withStrike = opts.filter((r) => Number.isFinite(strikeOf(r)));
-      withStrike.sort((a, b) => Math.abs(strikeOf(a) - closeAtExpiry) - Math.abs(strikeOf(b) - closeAtExpiry));
-      picked = withStrike.find((r) => String(r.instrument_type || '').includes('CE') || /CE$/.test(String(r.tradingsymbol || '')))
-        || withStrike[0];
-    }
-    if (!picked) {
-      report('expired_option_candles', false, {
-        expiry,
-        masterRows: master.length,
-        matchingContracts: opts.length,
-        niftyCloseAtExpiry: closeAtExpiry,
-        note: 'could not identify an expired NIFTY contract in the master — inspect master schema',
-      });
-    } else {
-      const key = picked.instrument_key;
-      const daily = await provider.getDailyCandles(key, shiftDays(expiry, -30), expiry);
-      const mins = await provider.getMinuteCandles(key, expiry, expiry, 1);
-      report('expired_option_candles', daily.length > 0 && mins.length > 0, {
-        expiry,
-        contract: picked.tradingsymbol || picked.trading_symbol || key,
-        instrumentKey: key,
-        niftyCloseAtExpiry: closeAtExpiry,
-        dailyBars: daily.length,
-        minuteBarsOnExpiryDay: mins.length,
-        note: daily.length > 0 && mins.length > 0
-          ? 'expired-contract candles ARE retained — options lane backtest is possible'
-          : 'expired-contract candles NOT returned — options lane stays modelled, not measured',
-      });
-    }
+    master = await fetchNseMaster();
   } catch (err) {
-    report('expired_option_candles', false, { note: err.message.slice(0, 160) });
+    report('expired_option_candles', false, { note: `NSE master fetch failed: ${err.message.slice(0, 120)}` });
+  }
+  if (master) {
+    for (const u of UNDERLYINGS) {
+      const testName = `expired_option_candles_${u.name}`;
+      try {
+        const target = shiftDays(today, -90);
+        const expiry = expiryOnOrBefore(expiryList(master, u.name), target);
+        if (!expiry) {
+          report(testName, false, { note: `no ${u.name} expiry on/before ${target} in the master` });
+          continue;
+        }
+        const idxDaily = await provider.getDailyCandles(u.indexKey, shiftDays(expiry, -3), expiry);
+        const closeAtExpiry = idxDaily.length ? idxDaily[idxDaily.length - 1].close : null;
+        const opts = optionContracts(master, u.name, expiry);
+        const picked = closeAtExpiry != null ? pickAtmCe(opts, closeAtExpiry) : null;
+        if (!picked) {
+          report(testName, false, {
+            expiry,
+            masterRows: master.length,
+            matchingContracts: opts.length,
+            indexCloseAtExpiry: closeAtExpiry,
+            note: 'could not identify an expired ATM contract in the master — inspect master schema',
+          });
+          continue;
+        }
+        const key = picked.instrument_key;
+        const daily = await provider.getDailyCandles(key, shiftDays(expiry, -30), expiry);
+        const mins = await provider.getMinuteCandles(key, expiry, expiry, 1);
+        report(testName, daily.length > 0 && mins.length > 0, {
+          expiry,
+          contract: symbolOf(picked) || key,
+          instrumentKey: key,
+          indexCloseAtExpiry: closeAtExpiry,
+          dailyBars: daily.length,
+          minuteBarsOnExpiryDay: mins.length,
+          note: daily.length > 0 && mins.length > 0
+            ? 'expired-contract candles ARE retained — options lane backtest is possible'
+            : 'expired-contract candles NOT returned — options lane stays modelled, not measured',
+        });
+      } catch (err) {
+        report(testName, false, { note: err.message.slice(0, 160) });
+      }
+    }
   }
 
   // 7. Split/bonus scan: any daily close jumping >25% day-on-day in the 33.
@@ -249,6 +324,42 @@ async function main() {
     report('split_scan', false, { note: err.message.slice(0, 160) });
   }
 
+  // 8. Expired monthly futures candles (NIFTY + BANKNIFTY) — the "Future"
+  // half of the F&O data. Same master-driven expiry lookup as test 6.
+  if (master) {
+    for (const u of UNDERLYINGS) {
+      const testName = `expired_futures_candles_${u.name}`;
+      try {
+        const target = shiftDays(today, -60);
+        const expiry = expiryOnOrBefore(expiryList(master, u.name), target);
+        if (!expiry) {
+          report(testName, false, { note: `no ${u.name} expiry on/before ${target} in the master` });
+          continue;
+        }
+        const futs = futureContracts(master, u.name, expiry);
+        if (!futs.length) {
+          report(testName, false, { expiry, note: `no ${u.name} FUT contract with expiry ${expiry} in the master` });
+          continue;
+        }
+        const key = futs[0].instrument_key;
+        const daily = await provider.getDailyCandles(key, shiftDays(expiry, -30), expiry);
+        const mins = await provider.getMinuteCandles(key, expiry, expiry, 1);
+        report(testName, daily.length > 0 && mins.length > 0, {
+          expiry,
+          contract: symbolOf(futs[0]) || key,
+          instrumentKey: key,
+          dailyBars: daily.length,
+          minuteBarsOnExpiryDay: mins.length,
+          note: daily.length > 0 && mins.length > 0
+            ? 'expired futures candles ARE retained — futures backtest is possible'
+            : 'expired futures candles NOT returned',
+        });
+      } catch (err) {
+        report(testName, false, { note: err.message.slice(0, 160) });
+      }
+    }
+  }
+
   fs.mkdirSync(CACHE, { recursive: true });
   const outPath = path.join(CACHE, `probe-${today}.json`);
   fs.writeFileSync(outPath, JSON.stringify(results, null, 2));
@@ -257,7 +368,11 @@ async function main() {
   console.log(`\nProbe: ${passed}/${total} passed. Saved ${outPath}`);
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
+
+module.exports = { expiryList, expiryOnOrBefore, optionContracts, futureContracts, pickAtmCe, strikeOf, symbolOf, symbolFor };
