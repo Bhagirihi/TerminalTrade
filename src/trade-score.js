@@ -58,6 +58,11 @@ const DEFAULTS = {
   // Trade plan defaults (same as muhurat2): -5% stop, +22% first target.
   slPct: 5,
   t1Pct: 22,
+  // Liquidity: the ATM option's best bid/ask spread, from the live
+  // websocket feed, must be this tight (percent of mid) to pass.
+  // ATM weeklies typically run 0.05-0.3%; a wider spread means the
+  // quote is stale or the strike is thin — not a trade to chase.
+  maxSpreadPct: 0.5,
   minRiskReward: 2,
 };
 
@@ -141,4 +146,16 @@ function scoreTrade(input) {
   };
 }
 
-module.exports = { scoreTrade, CHECKS, DEFAULTS };
+module.exports = { scoreTrade, spreadOk, CHECKS, DEFAULTS };
+
+// Spread check for the liquidity score, fed by the live feed's best
+// bid/ask for the ATM option. Returns true when the spread is at most
+// maxPct percent of mid, false when it is wider, and null when the quote
+// is unusable (no bid/ask, crossed, or non-positive) — null scores as
+// 'nodata', not a fail.
+function spreadOk(bid, ask, maxPct = DEFAULTS.maxSpreadPct) {
+  if (!Number.isFinite(bid) || !Number.isFinite(ask) || bid <= 0 || ask <= bid) return null;
+  const mid = (bid + ask) / 2;
+  if (!(mid > 0)) return null;
+  return ((ask - bid) / mid * 100) <= maxPct;
+}

@@ -22,7 +22,9 @@
 const readline = require('readline');
 const { upstoxCredentials, runInteractiveUpstoxLogin } = require('../src/upstox-auth');
 const { UpstoxApi } = require('../src/upstox-api');
-const { suggestAll, formatSuggestion } = require('../src/suggest');
+const { suggestAll, formatSuggestion, loadOptionBook, atmBandKeys, UNDERLYINGS } = require('../src/suggest');
+const { spreadOk } = require('../src/trade-score');
+const { nearestStepStrike } = require('../src/strikes');
 const { loadPaperTrades, savePaperTrades, recordPaperTrade, hasOpenTradeFor, closePaperTrade } = require('../src/paper');
 const { loadLiveTrades, saveLiveTrades, recordLiveTrade, placeLiveEntry, syncLivePositions, exitLivePosition } = require('../src/trading');
 const { optionsNetPnl } = require('../src/charges');
@@ -361,6 +363,31 @@ async function squareOffAll(state, api, nowMs) {
 }
 
 // One watch tick. Returns 'done' when the market day is over.
+async function warmLiquidityBand(state, api) {
+  // Subscribe to the ATM ± 1 strike CE/PE keys (from the contracts API's
+  // numeric tokens) so the feed's bid/ask is warm when a setup appears
+  // and the score can judge liquidity. The book is cached and refreshed
+  // only when the ATM moves more than a strike or every 30 minutes.
+  if (!state.feed) return;
+  if (!state.warmBook) state.warmBook = {};
+  for (const symbol of UNDERLYINGS) {
+    const ltp = state.indexLtps.get(symbol.upstoxKey);
+    if (!Number.isFinite(ltp)) continue;
+    const atm = nearestStepStrike(ltp, symbol.strikeStep);
+    const cached = state.warmBook[symbol.id];
+    const stale = !cached || Date.now() - cached.atMs > 30 * 60 * 1000
+      || Math.abs(atm - cached.atm) > symbol.strikeStep;
+    if (!stale) continue;
+    try {
+      const book = await loadOptionBook(api, symbol, istDateKey(Date.now()));
+      state.warmBook[symbol.id] = { book, atm, atMs: Date.now() };
+      state.feed.subscribe(atmBandKeys(book, atm, symbol));
+    } catch (e) {
+      log(state, `${symbol.id} warm-up book failed: ${e.message || e}`);
+    }
+  }
+}
+
 async function tick(state, api, nowMs) {
   const p = istParts(nowMs);
   const mins = p.hour * 60 + p.minute;
@@ -383,9 +410,23 @@ async function tick(state, api, nowMs) {
   }
   state.indexLtps = indexLtps;
 
+  // Warm the feed's bid/ask for the ATM band before scoring, so the
+  // liquidity check has a live spread to judge.
+  await warmLiquidityBand(state, api);
+
   let suggestions = [];
   try {
-    suggestions = await suggestAll(api, undefined, { budget: state.remaining });
+    suggestions = await suggestAll(api, undefined, {
+      budget: state.remaining,
+      // Liquidity: the ATM option's spread from the live feed. No quote
+      // yet (feed down, or the band still warming up) -> null -> the
+      // check scores as 'nodata', exactly like before the feed existed.
+      liquidityFor: (key) => {
+        const q = state.feed ? state.feed.getQuote(key) : null;
+        if (!q) return null;
+        return spreadOk(q.bid, q.ask);
+      },
+    });
   } catch (e) {
     log(state, `suggestions failed: ${e.message || e}`);
   }
@@ -504,6 +545,12 @@ async function main() {
     token: creds.accessToken,
     onQuote: (q) => {
       if (!state) return;
+      // The header levels come from state.indexLtps, which the 30s tick
+      // refreshes — so a live index tick must land there too, or the
+      // header looks frozen between ticks even while the feed is live.
+      if (q.instrumentKey === 'NSE_INDEX|Nifty 50' || q.instrumentKey === 'NSE_INDEX|Nifty Bank') {
+        state.indexLtps.set(q.instrumentKey, q.ltp);
+      }
       const pos = [...state.positions.live, ...state.positions.paper]
         .find((p) => p.status === 'OPEN' && p.instrumentKey === q.instrumentKey);
       if (pos) {
@@ -536,6 +583,7 @@ async function main() {
     tradedToday: new Set(),
     lastBar: {},
     lastCards: {},
+    warmBook: {},
     log: [],
     printedLog: 0,
     lastRenderMs: 0,
@@ -582,4 +630,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { tick, enterTrade, monitorPositions, squareOffAll, checkPositionQuote, marketOpen, render, daySummary };
+module.exports = { tick, enterTrade, monitorPositions, squareOffAll, checkPositionQuote, warmLiquidityBand, marketOpen, render, daySummary };

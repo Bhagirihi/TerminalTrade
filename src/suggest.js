@@ -72,7 +72,7 @@ async function loadOptionBook(api, symbol, today) {
 // Returns { id, status, entry, score, regime, card?, asOf?, reason? } where
 // status is 'trade' | 'no-trade' | 'no-data' | 'error'. A failure here never
 // throws — the other underlying still gets its suggestion.
-async function suggestFor(api, symbol, budgetState) {
+async function suggestFor(api, symbol, budgetState, opts = {}) {
   const base = { id: symbol.id };
   let bars5;
   let bars15;
@@ -89,22 +89,33 @@ async function suggestFor(api, symbol, budgetState) {
   const entry = evaluateEntry(bars5);
   const regime = classifyRegime(bars5);
   if (!entry.evaluable) return { ...base, status: 'no-data', entry, regime, asOf, reason: entry.reason };
+  // When the entry passes, resolve the ATM contract BEFORE scoring, so
+  // the score can judge its liquidity from the live feed's bid/ask
+  // spread. The option key is a numeric exchange token (NSE_FO|37590) —
+  // it comes from the contracts API, never constructed from the strike.
+  let book = null;
+  let atm = null;
+  let key = null;
+  if (entry.passed) {
+    const indexLtp = last(bars5).close;
+    try {
+      book = await loadOptionBook(api, symbol, istDateKey(Date.now()));
+    } catch (e) {
+      return { ...base, status: 'error', entry, regime, asOf, reason: `option book failed: ${e.message}` };
+    }
+    atm = nearestListedStrike(indexLtp, book.strikes) || nearestStepStrike(indexLtp, symbol.strikeStep);
+    key = book.instruments[`${atm}|${entry.side}`];
+    if (!key) return { ...base, status: 'error', entry, regime, asOf, reason: `no ${entry.side} contract at ${atm}` };
+  }
+  const liquidityOk = entry.passed && key && typeof opts.liquidityFor === 'function'
+    ? opts.liquidityFor(key)
+    : null;
   const score = entry.passed
-    ? scoreTrade({ side: entry.side, entry, bars5, bars15, liquidityOk: null })
+    ? scoreTrade({ side: entry.side, entry, bars5, bars15, liquidityOk })
     : null;
   if (!entry.passed || !score.tradeable) {
-    return { ...base, status: 'no-trade', entry, score, regime, asOf };
+    return { ...base, status: 'no-trade', entry, score, regime, asOf, atmKeys: book ? atmBandKeys(book, atm, symbol) : [] };
   }
-  const indexLtp = last(bars5).close;
-  let book;
-  try {
-    book = await loadOptionBook(api, symbol, istDateKey(Date.now()));
-  } catch (e) {
-    return { ...base, status: 'error', entry, score, regime, asOf, reason: `option book failed: ${e.message}` };
-  }
-  const atm = nearestListedStrike(indexLtp, book.strikes) || nearestStepStrike(indexLtp, symbol.strikeStep);
-  const key = book.instruments[`${atm}|${entry.side}`];
-  if (!key) return { ...base, status: 'error', entry, score, regime, asOf, reason: `no ${entry.side} contract at ${atm}` };
   let ltp = book.chainLtp[key];
   if (!Number.isFinite(ltp)) {
     try { ltp = await api.getLtp(key); } catch (_) { ltp = null; }
@@ -144,14 +155,28 @@ async function suggestFor(api, symbol, budgetState) {
     budgetState.remaining = +(budgetState.remaining - card.totalCost).toFixed(2);
     card.budgetLeft = budgetState.remaining;
   }
-  return { ...base, status: 'trade', entry, score, regime, asOf, card };
+  return { ...base, status: 'trade', entry, score, regime, asOf, card, atmKeys: atmBandKeys(book, atm, symbol) };
+}
+
+// ATM ± 1 strike, both sides — the keys the watch loop subscribes to so
+// the feed's bid/ask is warm when a setup appears. Keys come from the
+// book (numeric exchange tokens), never built from strike numbers.
+function atmBandKeys(book, atm, symbol) {
+  const keys = [];
+  for (const s of [atm - symbol.strikeStep, atm, atm + symbol.strikeStep]) {
+    for (const side of ['CE', 'PE']) {
+      const k = book.instruments[`${s}|${side}`];
+      if (k) keys.push(k);
+    }
+  }
+  return keys;
 }
 
 async function suggestAll(api, ids, opts = {}) {
   const list = UNDERLYINGS.filter((s) => !ids || ids.includes(s.id));
   const budgetState = opts.budget != null ? { remaining: opts.budget } : null;
   const out = [];
-  for (const symbol of list) out.push(await suggestFor(api, symbol, budgetState));
+  for (const symbol of list) out.push(await suggestFor(api, symbol, budgetState, opts));
   return out;
 }
 
@@ -298,4 +323,4 @@ function formatSuggestion(s) {
   return term.card(title, lines);
 }
 
-module.exports = { suggestFor, suggestAll, formatSuggestion, loadOptionBook, UNDERLYINGS, SL_PCT, T1_PCT, T2_PCT };
+module.exports = { suggestFor, suggestAll, formatSuggestion, loadOptionBook, atmBandKeys, UNDERLYINGS, SL_PCT, T1_PCT, T2_PCT };
