@@ -15,7 +15,7 @@ const { evaluateEntry } = require('./entry-rules');
 const { scoreTrade } = require('./trade-score');
 const { classifyRegime } = require('./regime');
 const { nearestListedStrike, nearestStepStrike } = require('./strikes');
-const { istDateKey } = require('./time');
+const { istDateKey, istTimeStr } = require('./time');
 
 const UNDERLYINGS = [
   { id: 'NIFTY', name: 'NIFTY 50', upstoxKey: 'NSE_INDEX|Nifty 50', lotSize: 65, strikeStep: 50 },
@@ -63,47 +63,51 @@ async function loadOptionBook(api, symbol, today) {
 }
 
 // One underlying: fetch candles, run the V3 rules, build the card if tradeable.
-// Returns { id, status, entry, score, regime, card?, reason? } where status is
-// 'trade' | 'no-trade' | 'no-data' | 'error'. A failure here never throws —
-// the other underlying still gets its suggestion.
+// Candles come from the last 5 calendar days + today (see getCandlesWindow),
+// so the indicators are seeded even before 14:15 IST. The session VWAP
+// still resets each day, so today's VWAP stays today's.
+// Returns { id, status, entry, score, regime, card?, asOf?, reason? } where
+// status is 'trade' | 'no-trade' | 'no-data' | 'error'. A failure here never
+// throws — the other underlying still gets its suggestion.
 async function suggestFor(api, symbol) {
   const base = { id: symbol.id };
   let bars5;
   let bars15;
   try {
-    bars5 = await api.getIntradayCandles(symbol.upstoxKey, 5);
-    bars15 = await api.getIntradayCandles(symbol.upstoxKey, 15);
+    bars5 = await api.getCandlesWindow(symbol.upstoxKey, 5);
+    bars15 = await api.getCandlesWindow(symbol.upstoxKey, 15);
   } catch (e) {
     return { ...base, status: 'error', reason: `candles failed: ${e.message}` };
   }
   if (!bars5.length) {
-    return { ...base, status: 'no-data', reason: 'no 5m candles yet today (pre-open, holiday, or market closed)' };
+    return { ...base, status: 'no-data', reason: 'no 5m candles in the last 5 days (market closed?)' };
   }
+  const asOf = `${istDateKey(last(bars5).t)} ${istTimeStr(last(bars5).t)} IST`;
   const entry = evaluateEntry(bars5);
   const regime = classifyRegime(bars5);
-  if (!entry.evaluable) return { ...base, status: 'no-data', entry, regime, reason: entry.reason };
+  if (!entry.evaluable) return { ...base, status: 'no-data', entry, regime, asOf, reason: entry.reason };
   const score = entry.passed
     ? scoreTrade({ side: entry.side, entry, bars5, bars15, liquidityOk: null })
     : null;
   if (!entry.passed || !score.tradeable) {
-    return { ...base, status: 'no-trade', entry, score, regime };
+    return { ...base, status: 'no-trade', entry, score, regime, asOf };
   }
   const indexLtp = last(bars5).close;
   let book;
   try {
     book = await loadOptionBook(api, symbol, istDateKey(Date.now()));
   } catch (e) {
-    return { ...base, status: 'error', entry, score, regime, reason: `option book failed: ${e.message}` };
+    return { ...base, status: 'error', entry, score, regime, asOf, reason: `option book failed: ${e.message}` };
   }
   const atm = nearestListedStrike(indexLtp, book.strikes) || nearestStepStrike(indexLtp, symbol.strikeStep);
   const key = book.instruments[`${atm}|${entry.side}`];
-  if (!key) return { ...base, status: 'error', entry, score, regime, reason: `no ${entry.side} contract at ${atm}` };
+  if (!key) return { ...base, status: 'error', entry, score, regime, asOf, reason: `no ${entry.side} contract at ${atm}` };
   let ltp = book.chainLtp[key];
   if (!Number.isFinite(ltp)) {
     try { ltp = await api.getLtp(key); } catch (_) { ltp = null; }
   }
   if (!Number.isFinite(ltp)) {
-    return { ...base, status: 'no-trade', entry, score, regime, reason: `no live premium for ${symbol.id} ${atm} ${entry.side}` };
+    return { ...base, status: 'no-trade', entry, score, regime, asOf, reason: `no live premium for ${symbol.id} ${atm} ${entry.side}` };
   }
   const lot = book.lotByKey[key] || symbol.lotSize;
   const card = {
@@ -118,7 +122,7 @@ async function suggestFor(api, symbol) {
     costPerLot: +(ltp * lot).toFixed(2),
     maxLossPerLot: +(ltp * lot * SL_PCT / 100).toFixed(2),
   };
-  return { ...base, status: 'trade', entry, score, regime, card };
+  return { ...base, status: 'trade', entry, score, regime, asOf, card };
 }
 
 async function suggestAll(api, ids) {
@@ -132,6 +136,7 @@ function fmt(n) { return Number.isFinite(n) ? String(n) : '—'; }
 
 function formatSuggestion(s) {
   const lines = [`\n== ${s.id} ==`];
+  if (s.asOf) lines.push(`  As of ${s.asOf} (last closed 5m bar)`);
   if (s.status === 'error' || s.status === 'no-data') {
     lines.push(`  ${s.reason || 'no data'}`);
     return lines.join('\n');

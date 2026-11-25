@@ -11,8 +11,10 @@
 // before any data call.
 
 const { isUpstoxAuthError } = require('./upstox-auth');
+const { istDateKey } = require('./time');
 
 const BASE = 'https://api.upstox.com';
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 class UpstoxApi {
   constructor(token, opts = {}) {
@@ -66,6 +68,44 @@ class UpstoxApi {
       `${BASE}/v3/historical-candle/intraday/${encodeURIComponent(instrumentKey)}/minutes/${minutes}`
     );
     return this.parseCandles(j);
+  }
+
+  // Historical minute candles over a date range (YYYY-MM-DD), oldest first.
+  // Upstox takes (toDate, fromDate) in the URL — same order as main.
+  async getHistoricalCandles(instrumentKey, minutes, fromDate, toDate) {
+    const j = await this.fetchJson(
+      `${BASE}/v3/historical-candle/${encodeURIComponent(instrumentKey)}/minutes/${minutes}/${toDate}/${fromDate}`
+    );
+    return this.parseCandles(j);
+  }
+
+  // Candles for the last `daysBack` calendar days + today, oldest first.
+  // Merges the historical range with today's intraday bars (intraday wins on
+  // overlap) and drops the still-forming bar, so callers only ever see
+  // closed bars — the entry rules require a candle close.
+  // Why this exists: the intraday endpoint only returns today's bars, so
+  // before ~14:15 IST there are fewer than the 60 five-minute bars the
+  // indicators need, and the 15m trend check (50 bars) needs ~2 days
+  // regardless. A 5-day window always covers it, holidays included.
+  async getCandlesWindow(instrumentKey, minutes, daysBack = 5) {
+    const now = Date.now();
+    const toDate = istDateKey(now);
+    const fromDate = istDateKey(now - daysBack * DAY_MS);
+    const byT = new Map();
+    try {
+      for (const c of await this.getHistoricalCandles(instrumentKey, minutes, fromDate, toDate)) byT.set(c.t, c);
+    } catch (_) {
+      /* intraday below still gives today */
+    }
+    try {
+      for (const c of await this.getIntradayCandles(instrumentKey, minutes)) byT.set(c.t, c);
+    } catch (_) {
+      /* keep historical */
+    }
+    const closeMs = minutes * 60 * 1000;
+    return [...byT.values()]
+      .filter((c) => c.t + closeMs <= now)
+      .sort((a, b) => a.t - b.t);
   }
 
   async getOptionContracts(instrumentKey) {
