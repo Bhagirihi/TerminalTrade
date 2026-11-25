@@ -67,6 +67,34 @@ function brokerageFor(value) {
   return Math.min(COST.brokeragePct * value, COST.brokerageCap);
 }
 
+// --- Costs: Upstox options (published schedule, Sep 2026 check) ----------------
+// Brokerage flat Rs 20 per executed order; STT 0.15% of sell-side premium
+// (raised from 0.1% on 1 Apr 2026); NSE txn 0.03553% of sell premium; SEBI
+// Rs 10/crore; stamp 0.003% of buy premium; GST 18% on (brokerage + txn +
+// SEBI). Values are premium turnover (premium x qty).
+const OPT_COST = {
+  brokeragePerOrder: 20,
+  sttSellPct: 0.0015,
+  txnSellPct: 0.0003553,
+  sebiPct: 0.000001,
+  stampBuyPct: 0.00003,
+  gstPct: 0.18,
+};
+
+/** Full options charge stack for one round trip. Values are premium turnover. */
+function optionsRoundTripCost(buyValue, sellValue) {
+  const b = Number(buyValue) || 0;
+  const s = Number(sellValue) || 0;
+  const brokerage = r2(OPT_COST.brokeragePerOrder * 2);
+  const stt = r2(OPT_COST.sttSellPct * s);
+  const txn = r2(OPT_COST.txnSellPct * s);
+  const sebi = r2(OPT_COST.sebiPct * s);
+  const stamp = r2(OPT_COST.stampBuyPct * b);
+  const gst = r2(OPT_COST.gstPct * (brokerage + txn + sebi));
+  const total = r2(brokerage + stt + txn + sebi + stamp + gst);
+  return { brokerage, stt, txn, sebi, stamp, gst, total };
+}
+
 /** Full intraday charge stack for one round trip. Values are turnover (Rs). */
 function intradayRoundTripCost(buyValue, sellValue) {
   const b = Number(buyValue) || 0;
@@ -467,7 +495,9 @@ function dayDoc(result) {
 module.exports = {
   UNIVERSE,
   COST,
+  OPT_COST,
   intradayRoundTripCost,
+  optionsRoundTripCost,
   buildSymbolDay,
   buildRow,
   replayDay,
