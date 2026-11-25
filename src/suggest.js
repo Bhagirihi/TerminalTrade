@@ -134,6 +134,42 @@ async function suggestAll(api, ids) {
 
 function fmt(n) { return Number.isFinite(n) ? String(n) : '—'; }
 
+function px(n, d = 2) { return Number.isFinite(n) ? n.toFixed(d) : '—'; }
+
+function vol(n) { return Number.isFinite(n) ? Math.round(n).toLocaleString('en-IN') : '—'; }
+
+// One side's five entry conditions with the actual readings, so a "no setup"
+// shows exactly which checks failed and by how much.
+function formatEntryChecks(entry) {
+  const v = entry.values;
+  const labels = {
+    CE: {
+      vsVwap: `Price above VWAP — close ${px(v.close)} vs VWAP ${px(v.vwap)}`,
+      emaAligned: `EMA 20 above EMA 50 — ${px(v.emaFast)} vs ${px(v.emaSlow)}`,
+      rsiSide: `RSI above 50 — RSI ${px(v.rsi, 1)}`,
+      macdConfirm: `MACD bullish — line ${px(v.macdLine)} vs signal ${px(v.macdSignal)}, hist ${px(v.macdHist)}`,
+      volumeBacked: `Volume above MA 20 — ${vol(v.volume)} vs ${vol(v.volMa)}`,
+    },
+    PE: {
+      vsVwap: `Price below VWAP — close ${px(v.close)} vs VWAP ${px(v.vwap)}`,
+      emaAligned: `EMA 20 below EMA 50 — ${px(v.emaFast)} vs ${px(v.emaSlow)}`,
+      rsiSide: `RSI below 50 — RSI ${px(v.rsi, 1)}`,
+      macdConfirm: `MACD bearish — line ${px(v.macdLine)} vs signal ${px(v.macdSignal)}, hist ${px(v.macdHist)}`,
+      volumeBacked: `Volume above MA 20 — ${vol(v.volume)} vs ${vol(v.volMa)}`,
+    },
+  };
+  const lines = [];
+  for (const side of ['CE', 'PE']) {
+    const conds = entry.conditionsBySide ? entry.conditionsBySide[side] : null;
+    if (!conds) continue;
+    lines.push(`  ${side} checks:`);
+    for (const key of ['vsVwap', 'emaAligned', 'rsiSide', 'macdConfirm', 'volumeBacked']) {
+      lines.push(`    ${conds[key] ? '✓' : '✗'} ${labels[side][key]}`);
+    }
+  }
+  return lines;
+}
+
 function formatSuggestion(s) {
   const lines = [`\n== ${s.id} ==`];
   if (s.asOf) lines.push(`  As of ${s.asOf} (last closed 5m bar)`);
@@ -143,9 +179,13 @@ function formatSuggestion(s) {
   }
   if (s.entry) {
     lines.push(`  Entry: ${s.entry.passed ? `${s.entry.side} ${s.entry.entryType}` : 'no setup'}`);
+    if (s.entry.values) lines.push(...formatEntryChecks(s.entry));
   }
   if (s.score) {
     lines.push(`  Score: ${s.score.score}/${s.score.max} (${s.score.verdict}) — tradeable: ${s.score.tradeable}`);
+    for (const c of s.score.checks) {
+      lines.push(`    ${c.status === 'pass' ? '✓' : c.status === 'fail' ? '✗' : '?'} ${c.label} — ${c.scored}/${c.points}`);
+    }
   }
   if (s.regime && s.regime.evaluable) lines.push(`  Regime: ${s.regime.label} (ADX ${fmt(+s.regime.features.adx.toFixed(1))})`);
   if (s.status === 'no-trade') {

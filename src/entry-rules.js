@@ -84,9 +84,12 @@ function entryTypeFor(s, bars, o, side) {
 
 // Evaluate the last closed 5m bar. Returns:
 //   { evaluable, side: 'CE' | 'PE' | null, passed, entryType,
-//     conditions, values, reason? }
+//     conditions, conditionsBySide, values, reason? }
 // side is null when neither side's five conditions all hold (including when
-// indicators conflict). `values` carries the indicator readings at the bar
+// indicators conflict). `conditions` is the passing side's conditions (or
+// the CE fallback when nothing passed — what the scoring model reads);
+// `conditionsBySide` carries both sides so the caller can show exactly
+// which checks failed. `values` carries the indicator readings at the bar
 // for logging / the scoring model.
 function evaluateEntry(bars5, opts = {}) {
   const o = { ...DEFAULTS, ...opts };
@@ -119,7 +122,12 @@ function evaluateEntry(bars5, opts = {}) {
       return {
         evaluable: true, side, passed: true,
         entryType: entryTypeFor(s, bars5, o, side),
-        conditions, values,
+        conditions,
+        conditionsBySide: {
+          CE: side === 'CE' ? conditions : sideConditions(s, bars5, o, 'CE', i),
+          PE: side === 'PE' ? conditions : sideConditions(s, bars5, o, 'PE', i),
+        },
+        values,
       };
     }
   }
@@ -127,7 +135,12 @@ function evaluateEntry(bars5, opts = {}) {
   // which checks failed (the PE mirror fails on at least the same axis).
   return {
     evaluable: true, side: null, passed: false, entryType: null,
-    conditions: sideConditions(s, bars5, o, 'CE', i), values,
+    conditions: sideConditions(s, bars5, o, 'CE', i),
+    conditionsBySide: {
+      CE: sideConditions(s, bars5, o, 'CE', i),
+      PE: sideConditions(s, bars5, o, 'PE', i),
+    },
+    values,
   };
 }
 
