@@ -6,13 +6,19 @@
 //      as `npm run login` — main's muhurat2 logs in automatically instead,
 //      here you get asked first),
 //   3. shows your Upstox funds and the live NIFTY / BANKNIFTY levels,
-//   4. suggests trades from live NIFTY/BANKNIFTY candles using the V3 rules.
-// Suggestions only — no orders are placed.
+//   4. asks your trading budget for today (default: available funds) and
+//      sizes each suggestion in whole lots inside it,
+//   5. suggests trades from live NIFTY/BANKNIFTY candles using the V3 rules
+//      and records each one as a PAPER trade (paper/v3-paper-trades.jsonl).
+// Paper trading only — no live orders are placed. Run `npm run paper` to
+// see how the paper trades did.
 
 const readline = require('readline');
 const { upstoxCredentials, runInteractiveUpstoxLogin } = require('../src/upstox-auth');
 const { UpstoxApi } = require('../src/upstox-api');
 const { suggestAll, formatSuggestion } = require('../src/suggest');
+const { loadPaperTrades, recordPaperTrade, hasOpenTradeFor } = require('../src/paper');
+const { istDateKey } = require('../src/time');
 
 function inr(n) {
   return Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -25,6 +31,29 @@ function askYesNo(question) {
     rl.question(`${question} (y/n) `, (ans) => {
       rl.close();
       resolve(/^y(es)?$/i.test(ans.trim()));
+    });
+  });
+}
+
+// Trading budget for today. Non-interactive runs take the default
+// (available funds, if known); otherwise there is no budget cap and each
+// suggestion is paper-traded as 1 lot.
+function askBudget(defaultBudget) {
+  const def = defaultBudget != null && Number.isFinite(defaultBudget) && defaultBudget > 0
+    ? Math.floor(defaultBudget) : null;
+  if (!process.stdin.isTTY) return Promise.resolve(def);
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const label = def != null
+    ? `Trading budget for today (₹) [${def}]: `
+    : 'Trading budget for today (₹): ';
+  return new Promise((resolve) => {
+    rl.question(label, (ans) => {
+      rl.close();
+      const n = Number(String(ans).trim().replace(/,/g, ''));
+      if (Number.isFinite(n) && n > 0) return resolve(Math.floor(n));
+      if (ans.trim() === '' && def != null) return resolve(def);
+      console.log(`Invalid amount — using ${def != null ? `₹${def}` : '1 lot per trade'}.`);
+      resolve(def);
     });
   });
 }
@@ -84,10 +113,55 @@ async function main() {
     console.log(`NIFTY ${nifty ? inr(nifty) : '—'}  ·  BANKNIFTY ${bank ? inr(bank) : '—'}`);
   }
 
+  const budget = await askBudget(funds ? funds.available : null);
+  if (budget != null) console.log(`Trading budget for today: ₹${inr(budget)}`);
+
   console.log('Fetching live candles…');
-  const suggestions = await suggestAll(api);
+  const suggestions = await suggestAll(api, undefined, { budget });
   for (const s of suggestions) console.log(formatSuggestion(s));
-  console.log('\nSuggestions only — no orders placed.');
+
+  // Paper trading only — record each tradeable suggestion (one open paper
+  // position per contract per day, so a second run doesn't double-record).
+  // No live orders are placed anywhere in V3.
+  const today = istDateKey(Date.now());
+  const existing = loadPaperTrades();
+  let recorded = 0;
+  let totalCost = 0;
+  for (const s of suggestions) {
+    if (s.status !== 'trade') continue;
+    if (hasOpenTradeFor(existing, s.card.ticker, s.card.expiry, today)) {
+      console.log(`Paper: ${s.card.ticker} already open today — skipped duplicate.`);
+      continue;
+    }
+    const trade = {
+      id: `${today}-${s.card.ticker.replace(/ /g, '-')}`,
+      date: today,
+      recordedAt: new Date().toISOString(),
+      ticker: s.card.ticker,
+      strike: s.card.strike,
+      expiry: s.card.expiry,
+      side: s.entry.side,
+      instrumentKey: s.card.instrumentKey,
+      lots: s.card.lots,
+      qty: s.card.qty,
+      lotSize: s.card.lot,
+      entry: s.card.ltp,
+      sl: s.card.sl,
+      t1: s.card.t1,
+      t2: s.card.t2,
+      costPerLot: s.card.costPerLot,
+      totalCost: s.card.totalCost,
+      maxLoss: s.card.maxLoss,
+      budgetLeft: s.card.budgetLeft != null ? s.card.budgetLeft : null,
+      status: 'OPEN',
+    };
+    recordPaperTrade(trade);
+    existing.push(trade);
+    recorded += 1;
+    totalCost += trade.totalCost;
+  }
+  if (recorded) console.log(`\nPaper trades recorded: ${recorded} (total cost ₹${inr(totalCost)})`);
+  console.log('Paper trading only — no live orders placed. Run `npm run paper` to see how they did.');
 }
 
 main().catch((e) => {

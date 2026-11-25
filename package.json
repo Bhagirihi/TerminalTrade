@@ -9,6 +9,7 @@
   },
   "scripts": {
     "login": "node tools/upstox-login.js",
-    "start": "node tools/start.js"
+    "start": "node tools/start.js",
+    "paper": "node tools/paper-report.js"
   }
 }

@@ -72,7 +72,7 @@ async function loadOptionBook(api, symbol, today) {
 // Returns { id, status, entry, score, regime, card?, asOf?, reason? } where
 // status is 'trade' | 'no-trade' | 'no-data' | 'error'. A failure here never
 // throws — the other underlying still gets its suggestion.
-async function suggestFor(api, symbol) {
+async function suggestFor(api, symbol, budgetState) {
   const base = { id: symbol.id };
   let bars5;
   let bars15;
@@ -117,6 +117,7 @@ async function suggestFor(api, symbol) {
     ticker: `${symbol.id} ${atm} ${entry.side}`,
     strike: atm,
     expiry: book.expiry,
+    instrumentKey: key,
     lot,
     ltp: +ltp.toFixed(2),
     sl: +(ltp * (1 - SL_PCT / 100)).toFixed(2),
@@ -125,13 +126,32 @@ async function suggestFor(api, symbol) {
     costPerLot: +(ltp * lot).toFixed(2),
     maxLossPerLot: +(ltp * lot * SL_PCT / 100).toFixed(2),
   };
+  // Size in whole lots inside the day's budget (shared pool: NIFTY takes
+  // first, BANKNIFTY gets what's left). No budget -> 1 lot, paper-sized.
+  const remaining = budgetState ? budgetState.remaining : null;
+  const lots = remaining == null ? 1 : Math.floor(remaining / card.costPerLot);
+  if (lots < 1) {
+    return {
+      ...base, status: 'no-trade', entry, score, regime, asOf,
+      reason: `1 lot costs ₹${card.costPerLot.toFixed(2)}, only ₹${remaining.toFixed(2)} left in budget`,
+    };
+  }
+  card.lots = lots;
+  card.qty = lots * lot;
+  card.totalCost = +(card.costPerLot * lots).toFixed(2);
+  card.maxLoss = +(card.maxLossPerLot * lots).toFixed(2);
+  if (budgetState) {
+    budgetState.remaining = +(budgetState.remaining - card.totalCost).toFixed(2);
+    card.budgetLeft = budgetState.remaining;
+  }
   return { ...base, status: 'trade', entry, score, regime, asOf, card };
 }
 
-async function suggestAll(api, ids) {
+async function suggestAll(api, ids, opts = {}) {
   const list = UNDERLYINGS.filter((s) => !ids || ids.includes(s.id));
+  const budgetState = opts.budget != null ? { remaining: opts.budget } : null;
   const out = [];
-  for (const symbol of list) out.push(await suggestFor(api, symbol));
+  for (const symbol of list) out.push(await suggestFor(api, symbol, budgetState));
   return out;
 }
 
@@ -234,7 +254,10 @@ function formatSuggestion(s) {
     const c = s.card;
     lines.push(term.green(term.bold(`\u2713 TRADE: BUY ${c.ticker} \u2014 expiry ${c.expiry}, lot ${c.lot}`)));
     lines.push(`  Entry \u20b9${c.ltp}  \u00b7  SL \u20b9${c.sl} (-${SL_PCT}%)  \u00b7  T1 \u20b9${c.t1} (+${T1_PCT}%)  \u00b7  T2 \u20b9${c.t2} (+${T2_PCT}%)`);
-    lines.push(`  Cost/lot \u20b9${c.costPerLot}  \u00b7  max loss/lot \u20b9${c.maxLossPerLot}`);
+    const costLine = c.lots
+      ? `  Cost/lot \u20b9${c.costPerLot} \u00b7 ${c.lots} lot${c.lots > 1 ? 's' : ''} (${c.qty} qty) \u00b7 total \u20b9${c.totalCost} \u00b7 max loss \u20b9${c.maxLoss}${c.budgetLeft != null ? ` \u00b7 budget left \u20b9${c.budgetLeft}` : ''}`
+      : `  Cost/lot \u20b9${c.costPerLot}  \u00b7  max loss/lot \u20b9${c.maxLossPerLot}`;
+    lines.push(costLine);
     lines.push('');
     lines.push(`Score ${s.score.score}/${s.score.max} (${s.score.verdict}) \u2014 ${scoreSummary(s.score)}`);
     lines.push(`${term.green('\u2713')} All 5 ${s.entry.side} checks passed \u2014 ${entrySummary(s.entry)}`);
