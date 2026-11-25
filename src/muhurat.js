@@ -734,6 +734,10 @@ function allocateBudget(budget, buyRows, opts = {}) {
     picks,
     watchFilled: picks.filter((r) => r.fromWatch).map((r) => r.ticker),
     availableMargin: watchPool || null,
+    // Returned so a backtest (or any caller) can feed the confirm ledger back
+    // on the next rebuild — otherwise confirm ages never advance. Additive;
+    // existing callers ignore it.
+    confirmLedger: ledger,
   };
 }
 
