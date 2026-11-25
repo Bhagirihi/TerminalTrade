@@ -5,6 +5,9 @@
 //   node tools/muhurat-backtest-stocks.js --years 2
 //   node tools/muhurat-backtest-stocks.js --from 2025-11-24 --to 2026-11-23 --budget 15000
 //   node tools/muhurat-backtest-stocks.js --no-fetch      # cache only
+//   node tools/muhurat-backtest-stocks.js --prefetch --from 2022-11-19 --to 2026-11-23
+//     # download + cache all candles for the range, no replay (warm the cache
+//     # right after login; later runs then fetch nothing)
 // Needs UPSTOX_ACCESS_TOKEN in .env unless --no-fetch and the cache is complete.
 // Data is cached under cache/muhurat-backtest/ (daily per symbol, 1m per
 // symbol-month); re-runs only fetch what is missing.
@@ -30,7 +33,7 @@ const {
   dayDoc,
 } = require('../src/muhurat-backtest');
 
-const CACHE = path.join(__dirname, '..', 'cache', 'muhurat-backtest');
+const CACHE = process.env.MUHURAT_BACKTEST_CACHE || path.join(__dirname, '..', 'cache', 'muhurat-backtest');
 const DAYS_DIR = path.join(CACHE, 'days');
 const WARMUP_DAYS = 120; // live fetches today-120d of daily bars
 const BUDGET_DEFAULT = 15000; // shipped .env.example MUHURAT_BUDGET_STOCK
@@ -48,6 +51,7 @@ function parseArgs(argv) {
     else if (a === '--max-trades') out.maxTrades = Number(next());
     else if (a === '--no-fetch') out.noFetch = true;
     else if (a === '--symbols') out.symbols = next().split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
+    else if (a === '--prefetch') out.prefetch = true;
   }
   return out;
 }
@@ -92,11 +96,11 @@ function writeCache(file, data) {
 async function fetchDaily(provider, symbol, from, to, noFetch) {
   const file = path.join(CACHE, `daily_${symbol.ticker}_${from}_${to}.json`);
   const hit = readCache(file);
-  if (hit) return hit;
+  if (hit) return { bars: hit, hit: true };
   if (noFetch) throw new Error(`missing cache (daily ${symbol.ticker}) — run without --no-fetch`);
   const bars = await provider.getDailyCandles(symbol.key, from, to);
   writeCache(file, bars);
-  return bars;
+  return { bars, hit: false };
 }
 
 async function fetchMinuteMonth(provider, symbol, ym, noFetch) {
@@ -105,11 +109,69 @@ async function fetchMinuteMonth(provider, symbol, ym, noFetch) {
   const monthEnd = shiftDays(shiftMonths(`${ym}-01`, 1), -1);
   const file = path.join(CACHE, `minute1_${symbol.ticker}_${ym}.json`);
   const hit = readCache(file);
-  if (hit) return hit;
+  if (hit) return { bars: hit, hit: true };
   if (noFetch) throw new Error(`missing cache (1m ${symbol.ticker} ${ym}) — run without --no-fetch`);
   const bars = await provider.getMinuteCandles(symbol.key, `${ym}-01`, monthEnd, 1, { isToday: monthEnd === istDateKey(Date.now()) });
   writeCache(file, bars);
-  return bars;
+  return { bars, hit: false };
+}
+
+/**
+ * Prefetch all data a stocks backtest needs for [from, to]: daily bars
+ * (120d warmup + range) and 1m bars, month-chunked, per symbol — cache-first.
+ * Returns { from, to, dailyByTicker, minuteByTickerMonth, tradingDays,
+ * fetched: { daily, minuteMonths }, cacheHits: { daily, minuteMonths } }.
+ * The replay never fetches: runStocksBacktest calls this first, then replays
+ * purely from what it returned. `providerOverride` is for tests (a stub
+ * provider); otherwise the provider is built from UPSTOX_ACCESS_TOKEN.
+ */
+async function fetchStocksData(args, log = console.log, providerOverride = null) {
+  const today = istDateKey(Date.now());
+  const to = args.to || shiftDays(today, -1);
+  const from = args.from || shiftMonths(to, -args.years * 12);
+  const warmFrom = shiftDays(from, -WARMUP_DAYS);
+  const symbols = args.symbols
+    ? UNIVERSE.filter((s) => args.symbols.includes(s.ticker))
+    : UNIVERSE;
+  if (!symbols.length) throw new Error('No symbols matched --symbols');
+
+  let provider = providerOverride;
+  if (!provider) {
+    if (args.noFetch) provider = null;
+    else if (!config.upstox.accessToken) {
+      throw new Error('Set UPSTOX_ACCESS_TOKEN in .env (run npm run login first), or use --no-fetch with a warm cache.');
+    } else provider = new UpstoxProvider(config.upstox.accessToken);
+  }
+
+  const fetched = { daily: 0, minuteMonths: 0 };
+  const cacheHits = { daily: 0, minuteMonths: 0 };
+  const dailyByTicker = new Map();
+  for (const sym of symbols) {
+    process.stdout.write(`  daily ${sym.ticker}…\r`);
+    const { bars, hit } = await fetchDaily(provider, sym, warmFrom, to, args.noFetch);
+    if (hit) cacheHits.daily += 1; else fetched.daily += 1;
+    dailyByTicker.set(sym.ticker, bars);
+  }
+  process.stdout.write('\n');
+
+  const sbin = dailyByTicker.get('SBIN') || [...dailyByTicker.values()][0] || [];
+  const tradingDays = [...new Set(sbin.map((b) => istDateKey(b.t)))].filter((d) => d >= from && d <= to).sort();
+  log(`Trading days in range: ${tradingDays.length}`);
+
+  const chunks = monthChunks(from, to);
+  const minuteByTickerMonth = new Map();
+  for (const sym of symbols) {
+    for (const c of chunks) {
+      process.stdout.write(`  1m ${sym.ticker} ${c.from.slice(0, 7)}…\r`);
+      const { bars, hit } = await fetchMinuteMonth(provider, sym, c.from.slice(0, 7), args.noFetch);
+      if (hit) cacheHits.minuteMonths += 1; else fetched.minuteMonths += 1;
+      if (!minuteByTickerMonth.has(sym.ticker)) minuteByTickerMonth.set(sym.ticker, []);
+      minuteByTickerMonth.get(sym.ticker).push(...bars);
+    }
+  }
+  process.stdout.write('\n');
+  for (const arr of minuteByTickerMonth.values()) arr.sort((a, b) => a.t - b.t);
+  return { from, to, dailyByTicker, minuteByTickerMonth, tradingDays, fetched, cacheHits };
 }
 
 /**
@@ -120,68 +182,23 @@ async function fetchMinuteMonth(provider, symbol, ym, noFetch) {
  * progress lines; pass a no-op to silence them.
  */
 async function runStocksBacktest(args, log = console.log) {
-  const today = istDateKey(Date.now());
-  const to = args.to || shiftDays(today, -1);
-  const from = args.from || shiftMonths(to, -args.years * 12);
-  const warmFrom = shiftDays(from, -WARMUP_DAYS);
-  const symbols = args.symbols
-    ? UNIVERSE.filter((s) => args.symbols.includes(s.ticker))
-    : UNIVERSE;
-  if (!symbols.length) {
-    throw new Error('No symbols matched --symbols');
-  }
+  const { from, to, dailyByTicker, minuteByTickerMonth, tradingDays } = await fetchStocksData(args, log);
 
-  let provider = null;
-  if (!args.noFetch) {
-    if (!config.upstox.accessToken) {
-      throw new Error('Set UPSTOX_ACCESS_TOKEN in .env (run npm run login first), or use --no-fetch with a warm cache.');
-    }
-    provider = new UpstoxProvider(config.upstox.accessToken);
-  }
-
-  log(`Muhurat stocks backtest — ${from} → ${to} (${symbols.length} names, budget ₹${args.budget}, confirm ${args.confirmSec}s, max ${args.maxTrades}/day)`);
+  log(`Muhurat stocks backtest — ${from} → ${to} (${dailyByTicker.size} names, budget ₹${args.budget}, confirm ${args.confirmSec}s, max ${args.maxTrades}/day)`);
   log('Universe: fixed 33 only (NSE gainers excluded — live-only endpoint, no archive).');
   log('Sizing: lane budget only (C1 neutralised — see header). Loss gate: disabled.');
 
-  // --- Fetch daily bars (warmup + range) per symbol.
-  const dailyByTicker = new Map();
-  for (const sym of symbols) {
-    process.stdout.write(`  daily ${sym.ticker}…\r`);
-    const bars = await fetchDaily(provider, sym, warmFrom, to, args.noFetch);
-    dailyByTicker.set(sym.ticker, bars);
-  }
-  process.stdout.write('\n');
-
-  // Trading calendar: SBIN daily dates inside the range (NSE days).
-  const sbin = dailyByTicker.get('SBIN') || [...dailyByTicker.values()][0] || [];
-  const tradingDays = [...new Set(sbin.map((b) => istDateKey(b.t)))].filter((d) => d >= from && d <= to).sort();
-  log(`Trading days in range: ${tradingDays.length}`);
-
-  // --- Fetch 1m bars, month-chunked per symbol.
-  const chunks = monthChunks(from, to);
-  const minuteByTickerMonth = new Map();
-  for (const sym of symbols) {
-    for (const c of chunks) {
-      process.stdout.write(`  1m ${sym.ticker} ${c.from.slice(0, 7)}…\r`);
-      const bars = await fetchMinuteMonth(provider, sym, c.from.slice(0, 7), args.noFetch);
-      if (!minuteByTickerMonth.has(sym.ticker)) minuteByTickerMonth.set(sym.ticker, []);
-      minuteByTickerMonth.get(sym.ticker).push(...bars);
-    }
-  }
-  process.stdout.write('\n');
-  for (const arr of minuteByTickerMonth.values()) arr.sort((a, b) => a.t - b.t);
-
-  // --- Replay day by day.
+  // --- Replay day by day (purely from the prefetched data above).
   const dayResults = [];
   for (const date of tradingDays) {
     const symbolDays = new Map();
     const minuteBars = new Map();
-    for (const sym of symbols) {
-      const daily = (dailyByTicker.get(sym.ticker) || []).filter((b) => istDateKey(b.t) < date);
-      const sd = buildSymbolDay(sym, daily.slice(-WARMUP_DAYS));
-      if (sd) symbolDays.set(sym.ticker, sd);
-      const mins = (minuteByTickerMonth.get(sym.ticker) || []).filter((b) => istDateKey(b.t) === date);
-      if (mins.length) minuteBars.set(sym.ticker, mins);
+    for (const [ticker, daily] of dailyByTicker) {
+      const sym = UNIVERSE.find((s) => s.ticker === ticker);
+      const sd = buildSymbolDay(sym, daily.filter((b) => istDateKey(b.t) < date).slice(-WARMUP_DAYS));
+      if (sd) symbolDays.set(ticker, sd);
+      const mins = (minuteByTickerMonth.get(ticker) || []).filter((b) => istDateKey(b.t) === date);
+      if (mins.length) minuteBars.set(ticker, mins);
     }
     const result = replayDay(date, symbolDays, minuteBars, {
       budget: args.budget,
@@ -206,7 +223,7 @@ async function runStocksBacktest(args, log = console.log) {
     budget: args.budget,
     confirmSec: args.confirmSec,
     maxTrades: args.maxTrades,
-    universe: { fixed: symbols.map((s) => s.ticker), gainers: 'excluded — live-only NSE endpoint, no archive' },
+    universe: { fixed: [...dailyByTicker.keys()], gainers: 'excluded — live-only NSE endpoint, no archive' },
     assumptions: [
       'Fixed 33 names only (CORE 5 + EXTRA 28); NSE top-gainers leg excluded.',
       'Daily screen from bars strictly before day D (last full close D-1).',
@@ -236,6 +253,22 @@ async function runStocksBacktest(args, log = console.log) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.prefetch) {
+    let prefetched;
+    try {
+      prefetched = await fetchStocksData(args, console.log);
+    } catch (err) {
+      console.error(`Prefetch failed: ${err.message}`);
+      process.exitCode = 1;
+      return;
+    }
+    const { from, to, tradingDays, fetched, cacheHits } = prefetched;
+    console.log(`\nPrefetched ${from} → ${to}: ${tradingDays.length} trading days.`);
+    console.log(`  Fetched: ${fetched.daily} daily series, ${fetched.minuteMonths} symbol-months of 1m bars.`);
+    console.log(`  Cache hits: ${cacheHits.daily} daily series, ${cacheHits.minuteMonths} symbol-months.`);
+    console.log('Cache: cache/muhurat-backtest/ — later runs only fetch what is missing.');
+    return;
+  }
   const { from, to, summary, reportPath } = await runStocksBacktest(args);
   console.log('\n=== Muhurat stocks lane — 1-year backtest ===');
   console.log(`Period: ${from} → ${to}  ·  Days: ${summary.days}  ·  Trades: ${summary.trades}`);
@@ -257,4 +290,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { runStocksBacktest, parseArgs, shiftDays, shiftMonths, monthChunks };
+module.exports = { runStocksBacktest, fetchStocksData, parseArgs, shiftDays, shiftMonths, monthChunks };

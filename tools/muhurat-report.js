@@ -7,6 +7,9 @@
 //   node tools/muhurat-report.js --from 2022-11-19 --to 2026-11-23
 //   node tools/muhurat-report.js --dir paper/muhurat-history/days --no-color
 //   node tools/muhurat-report.js --no-html   # terminal only, no file
+//   node tools/muhurat-report.js --prefetch --from 2022-11-19 --to 2026-11-23
+//     # download + cache all candles the backtest part needs, no report yet
+//     # (run right after login; the report itself then fetches nothing)
 //
 // What a range means:
 // - Dates the live ledger covers (bot live since 2026-11-12) come from the
@@ -26,7 +29,7 @@ const fs = require('fs');
 const path = require('path');
 const { computeHistoryStats } = require('./muhurat-history-stats');
 const { summarizeDays } = require('../src/muhurat-backtest');
-const { runStocksBacktest, shiftDays } = require('./muhurat-backtest-stocks');
+const { runStocksBacktest, fetchStocksData, shiftDays } = require('./muhurat-backtest-stocks');
 
 const DEFAULT_DIR = path.join(__dirname, '..', 'paper', 'muhurat-history', 'days');
 
@@ -39,7 +42,7 @@ const RESET = '\u001b[0m';
 function parseArgs(argv) {
   const out = {
     dir: DEFAULT_DIR, from: null, to: null, noColor: false,
-    html: true, htmlPath: null, backtest: null, noFetch: false,
+    html: true, htmlPath: null, backtest: null, noFetch: false, prefetch: false,
     budget: 15000, confirmSec: 60, maxTrades: 5,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -55,6 +58,7 @@ function parseArgs(argv) {
     else if (a === '--backtest') out.backtest = true;
     else if (a === '--no-backtest') out.backtest = false;
     else if (a === '--no-fetch') out.noFetch = true;
+    else if (a === '--prefetch') out.prefetch = true;
     else if (a === '--budget' && hasValue) out.budget = Number(next) || 15000;
     else if (a === '--confirm-sec' && hasValue) out.confirmSec = Number(next) || 60;
     else if (a === '--max-trades' && hasValue) out.maxTrades = Number(next) || 5;
@@ -434,6 +438,32 @@ async function main() {
   const ledgerFirst = all.length ? all[0].date : null;
   const from = args.from || ledgerFirst || new Date().toISOString().slice(0, 10);
   const to = args.to || new Date().toISOString().slice(0, 10);
+  if (args.prefetch) {
+    const parts = splitRange(from, to, ledgerFirst);
+    if (!parts.backtest) {
+      console.log('Nothing to prefetch — the whole range is covered by the live ledger already on disk.');
+      return;
+    }
+    console.log(`Prefetching candles for the backtest part ${parts.backtest[0]} → ${parts.backtest[1]} (stocks lane)…`);
+    let prefetched;
+    try {
+      prefetched = await fetchStocksData({
+        from: parts.backtest[0], to: parts.backtest[1],
+        budget: args.budget, confirmSec: args.confirmSec, maxTrades: args.maxTrades,
+        noFetch: args.noFetch, years: 1,
+      }, console.log);
+    } catch (err) {
+      console.error(`Prefetch failed: ${err.message}`);
+      process.exitCode = 1;
+      return;
+    }
+    const { tradingDays, fetched, cacheHits } = prefetched;
+    console.log(`\nPrefetched ${parts.backtest[0]} → ${parts.backtest[1]}: ${tradingDays.length} trading days.`);
+    console.log(`  Fetched: ${fetched.daily} daily series, ${fetched.minuteMonths} symbol-months of 1m bars.`);
+    console.log(`  Cache hits: ${cacheHits.daily} daily series, ${cacheHits.minuteMonths} symbol-months.`);
+    console.log('Cache: cache/muhurat-backtest/ — the report command now fetches nothing for this range.');
+    return;
+  }
   const { sections, backtestSkipped } = await buildReport({
     liveDocs: inRange, ledgerFirst, from, to,
     backtest: args.backtest, runBacktest: runStocksBacktest,
