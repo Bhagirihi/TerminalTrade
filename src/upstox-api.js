@@ -22,11 +22,20 @@ class UpstoxApi {
     this.timeoutMs = (opts && opts.timeoutMs) || 15000;
   }
 
-  async fetchJson(url) {
+  // opts: { method, body } — GET by default. Single attempt, never
+  // retried: an order placement retried without an idempotency key could
+  // double-buy (the C2 lesson from muhurat2's placeOrder).
+  async fetchJson(url, opts = {}) {
     let res;
     try {
       res = await fetch(url, {
-        headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/json' },
+        method: opts.method || 'GET',
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          Accept: 'application/json',
+          ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
+        },
+        body: opts.body != null ? JSON.stringify(opts.body) : undefined,
         signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch (e) {
@@ -161,6 +170,76 @@ class UpstoxApi {
       used: Number.isFinite(used) ? used : 0,
       payin: Number(eq.payin_amount) || 0,
     };
+  }
+
+  // Live orders (real money when called). Product: I=intraday, D=delivery.
+  // Body shape copied from main's placeOrder (src/data/upstox.js).
+  async placeOrder({
+    instrumentToken,
+    quantity,
+    transactionType, // BUY | SELL
+    orderType = 'MARKET', // MARKET | LIMIT | SL | SL-M
+    product = 'I',
+    price = 0,
+    triggerPrice = 0,
+    validity = 'DAY',
+    tag = '',
+    isAmo = false,
+  }) {
+    const body = {
+      quantity: Number(quantity),
+      product,
+      validity,
+      price: Number(price) || 0,
+      tag: tag || undefined,
+      instrument_token: instrumentToken,
+      order_type: orderType,
+      transaction_type: transactionType,
+      disclosed_quantity: 0,
+      trigger_price: Number(triggerPrice) || 0,
+      is_amo: Boolean(isAmo),
+    };
+    const j = await this.fetchJson(`${BASE}/v2/order/place`, { method: 'POST', body });
+    return (j && j.data) || j;
+  }
+
+  async cancelOrder(orderId) {
+    const j = await this.fetchJson(
+      `${BASE}/v2/order/cancel?order_id=${encodeURIComponent(orderId)}`,
+      { method: 'DELETE' }
+    );
+    return (j && j.data) || j;
+  }
+
+  async getOrders() {
+    const j = await this.fetchJson(`${BASE}/v2/order/retrieve-all`);
+    const data = j && j.data;
+    return Array.isArray(data) ? data : [];
+  }
+
+  // Poll retrieve-all until the order reaches a terminal status (same
+  // approach as main's waitOrderResult). Returns null on timeout.
+  async getOrderResult(orderId, { tries = 10, delayMs = 350 } = {}) {
+    if (!orderId) return null;
+    for (let i = 0; i < tries; i += 1) {
+      await new Promise((r) => setTimeout(r, delayMs));
+      let orders = [];
+      try { orders = await this.getOrders(); } catch (_) { continue; }
+      const hit = (Array.isArray(orders) ? orders : []).find(
+        (o) => String(o.order_id || o.orderId || '') === String(orderId)
+      );
+      if (!hit) continue;
+      const status = String(hit.status || hit.order_status || '').toLowerCase();
+      if (/complete|completed|traded|filled|rejected|cancelled|canceled|failed/.test(status)) {
+        const avg = Number(hit.average_price != null ? hit.average_price : hit.averagePrice);
+        return {
+          status: hit.status || hit.order_status || status,
+          averagePrice: Number.isFinite(avg) ? avg : null,
+          atMs: Date.parse(hit.order_timestamp || hit.orderTimestamp) || Date.now(),
+        };
+      }
+    }
+    return null;
   }
 }
 

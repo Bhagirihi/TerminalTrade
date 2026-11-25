@@ -49,6 +49,17 @@ function computeSeries(bars, o) {
 }
 
 // The five conditions for one side ('CE' | 'PE') at bar index i.
+// Volume: index candles carry NO volume (Upstox returns 0 for NIFTY /
+// BANKNIFTY — an index has nothing traded), so an all-zero volume series
+// means "no volume data", not "no confirmation". That check is then
+// undefined (nodata): it neither passes nor blocks the side, and the
+// scorer reports it as not-checked instead of a fail.
+function volumeBacked(s, bar, i) {
+  if (!Number.isFinite(s.volMa[i])) return undefined;
+  if (bar.volume <= 0 && s.volMa[i] <= 0) return undefined;
+  return bar.volume > s.volMa[i];
+}
+
 function sideConditions(s, bars, o, side, i) {
   const bull = side === 'CE';
   const bar = bars[i];
@@ -59,11 +70,13 @@ function sideConditions(s, bars, o, side, i) {
     macdConfirm: bull
       ? s.macd.line[i] > s.macd.signal[i] && s.macd.hist[i] > 0
       : s.macd.line[i] < s.macd.signal[i] && s.macd.hist[i] < 0,
-    volumeBacked: Number.isFinite(s.volMa[i]) && bar.volume > s.volMa[i],
+    volumeBacked: volumeBacked(s, bar, i),
   };
 }
 
-function allTrue(conds) { return Object.values(conds).every(Boolean); }
+// True when no condition is false — an undefined (nodata) check does not
+// block the side.
+function allTrue(conds) { return Object.values(conds).every((v) => v !== false); }
 
 // 'breakout' when the conditions first become true on this bar;
 // 'retest' when they already held on the previous bar and this bar's low

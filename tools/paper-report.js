@@ -11,23 +11,12 @@
 
 const { upstoxCredentials } = require('../src/upstox-auth');
 const { UpstoxApi } = require('../src/upstox-api');
-const { loadPaperTrades, savePaperTrades } = require('../src/paper');
+const { loadPaperTrades, savePaperTrades, closePaperTrade } = require('../src/paper');
 const { optionsNetPnl } = require('../src/charges');
 const { istDateKey } = require('../src/time');
 
 function inr(n) {
   return Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
-function closeTrade(t, exitPx, reason, atMs) {
-  const { gross, charges, net } = optionsNetPnl(t.qty, t.entry, exitPx);
-  t.status = 'CLOSED';
-  t.exit = exitPx;
-  t.exitReason = reason;
-  t.exitAt = new Date(atMs).toISOString();
-  t.grossPnl = gross;
-  t.charges = charges;
-  t.netPnl = net;
 }
 
 async function main() {
@@ -61,8 +50,8 @@ async function main() {
     const todayBars = bars.filter((b) => istDateKey(b.t) === today);
     let closed = false;
     for (const b of todayBars) {
-      if (b.low <= t.sl) { closeTrade(t, t.sl, 'SL', b.t); closed = true; break; }
-      if (b.high >= t.t2) { closeTrade(t, t.t2, 'T2', b.t); closed = true; break; }
+      if (b.low <= t.sl) { closePaperTrade(t, t.sl, 'SL', b.t); closed = true; break; }
+      if (b.high >= t.t2) { closePaperTrade(t, t.t2, 'T2', b.t); closed = true; break; }
     }
     if (closed) { changed = true; continue; }
     const last = todayBars[todayBars.length - 1];

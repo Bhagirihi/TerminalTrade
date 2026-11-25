@@ -183,7 +183,14 @@ function formatEntryChecksSide(entry, side) {
   const conds = entry.conditionsBySide ? entry.conditionsBySide[side] : entry.conditions;
   const lines = [];
   for (const key of CHECK_KEYS) {
-    lines.push(`    ${conds[key] ? term.green('✓') : term.red('✗')} ${labels[side][key]}`);
+    if (conds[key] === undefined) {
+      const note = key === 'volumeBacked'
+        ? 'Volume \u2014 not available for indices (index candles carry no volume)'
+        : `${key} \u2014 no data`;
+      lines.push(`    ${term.yellow('?')} ${note}`);
+      continue;
+    }
+    lines.push(`    ${conds[key] ? term.green('\u2713') : term.red('\u2717')} ${labels[side][key]}`);
   }
   return lines;
 }
@@ -225,10 +232,13 @@ function scoreSummary(score) {
 
 function entrySummary(entry) {
   const v = entry.values;
+  const volTxt = entry.conditions && entry.conditions.volumeBacked === undefined
+    ? 'volume n/a (indices)'
+    : 'volume above MA';
   if (entry.side === 'PE') {
-    return `price below VWAP, EMA 20 < 50, RSI ${px(v.rsi, 1)}, MACD bearish, volume above MA`;
+    return `price below VWAP, EMA 20 < 50, RSI ${px(v.rsi, 1)}, MACD bearish, ${volTxt}`;
   }
-  return `price above VWAP, EMA 20 > 50, RSI ${px(v.rsi, 1)}, MACD bullish, volume above MA`;
+  return `price above VWAP, EMA 20 > 50, RSI ${px(v.rsi, 1)}, MACD bullish, ${volTxt}`;
 }
 
 // The whole point of this layout: the verdict first, then only the detail
@@ -267,10 +277,13 @@ function formatSuggestion(s) {
   if (s.entry && !s.entry.passed) {
     const side = closestSide(s.entry);
     const conds = s.entry.conditionsBySide[side];
-    const passed = Object.values(conds).filter(Boolean).length;
-    const failed = CHECK_KEYS.filter((k) => !conds[k]);
+    const passed = Object.values(conds).filter((v) => v === true).length;
+    const failed = CHECK_KEYS.filter((k) => conds[k] === false);
+    const nodata = CHECK_KEYS.filter((k) => conds[k] === undefined);
+    const measured = passed + failed.length;
     const reason = failed.map((k) => checkReason(side, k, s.entry.values)).join('; ');
-    lines.push(term.yellow(term.bold(`\u2717 NO TRADE \u2014 ${side} was ${passed} of 5 checks; ${reason}.`)));
+    const nodataNote = nodata.length ? ` (${nodata.map((k) => (k === 'volumeBacked' ? 'volume' : k)).join(', ')} not available)` : '';
+    lines.push(term.yellow(term.bold(`\u2717 NO TRADE \u2014 ${side} passed ${passed} of ${measured} measured checks; ${reason}.${nodataNote}`)));
     lines.push(...formatEntryChecksSide(s.entry, side));
     return term.card(title, lines);
   }

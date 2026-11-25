@@ -35,6 +35,19 @@ function recordPaperTrade(trade) {
   return trade;
 }
 
+// Close an open paper trade at a price, net of the options charge stack.
+function closePaperTrade(t, exitPx, reason, atMs) {
+  const { optionsNetPnl } = require('./charges');
+  const { gross, charges, net } = optionsNetPnl(t.qty, t.entry, exitPx);
+  t.status = 'CLOSED';
+  t.exit = exitPx;
+  t.exitReason = reason;
+  t.exitAt = new Date(atMs).toISOString();
+  t.grossPnl = gross;
+  t.charges = charges;
+  t.netPnl = net;
+}
+
 // One open paper position per contract per day — a second `npm run start`
 // suggesting the same contract does not double-record it.
 function hasOpenTradeFor(trades, ticker, expiry, date) {
@@ -43,4 +56,4 @@ function hasOpenTradeFor(trades, ticker, expiry, date) {
   );
 }
 
-module.exports = { LEDGER_FILE, loadPaperTrades, savePaperTrades, recordPaperTrade, hasOpenTradeFor };
+module.exports = { LEDGER_FILE, loadPaperTrades, savePaperTrades, recordPaperTrade, hasOpenTradeFor, closePaperTrade };
