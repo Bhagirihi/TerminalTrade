@@ -16,6 +16,9 @@ const { scoreTrade } = require('./trade-score');
 const { classifyRegime } = require('./regime');
 const { nearestListedStrike, nearestStepStrike } = require('./strikes');
 const { istDateKey, istTimeStr } = require('./time');
+const term = require('./terminal');
+
+const CHECK_KEYS = ['vsVwap', 'emaAligned', 'rsiSide', 'macdConfirm', 'volumeBacked'];
 
 const UNDERLYINGS = [
   { id: 'NIFTY', name: 'NIFTY 50', upstoxKey: 'NSE_INDEX|Nifty 50', lotSize: 65, strikeStep: 50 },
@@ -138,9 +141,8 @@ function px(n, d = 2) { return Number.isFinite(n) ? n.toFixed(d) : '—'; }
 
 function vol(n) { return Number.isFinite(n) ? Math.round(n).toLocaleString('en-IN') : '—'; }
 
-// One side's five entry conditions with the actual readings, so a "no setup"
-// shows exactly which checks failed and by how much.
-function formatEntryChecks(entry) {
+// One side's five entry conditions with the actual readings.
+function formatEntryChecksSide(entry, side) {
   const v = entry.values;
   const labels = {
     CE: {
@@ -158,45 +160,106 @@ function formatEntryChecks(entry) {
       volumeBacked: `Volume above MA 20 — ${vol(v.volume)} vs ${vol(v.volMa)}`,
     },
   };
+  const conds = entry.conditionsBySide ? entry.conditionsBySide[side] : entry.conditions;
   const lines = [];
-  for (const side of ['CE', 'PE']) {
-    const conds = entry.conditionsBySide ? entry.conditionsBySide[side] : null;
-    if (!conds) continue;
-    lines.push(`  ${side} checks:`);
-    for (const key of ['vsVwap', 'emaAligned', 'rsiSide', 'macdConfirm', 'volumeBacked']) {
-      lines.push(`    ${conds[key] ? '✓' : '✗'} ${labels[side][key]}`);
-    }
+  for (const key of CHECK_KEYS) {
+    lines.push(`    ${conds[key] ? term.green('✓') : term.red('✗')} ${labels[side][key]}`);
   }
   return lines;
 }
 
+// Plain words for one failed entry check, so "no trade" reads as a reason
+// instead of a raw indicator dump.
+function checkReason(side, key, v) {
+  const CE = {
+    vsVwap: `price is below VWAP (close ${px(v.close)} vs ${px(v.vwap)})`,
+    emaAligned: `EMA 20 is below EMA 50 (${px(v.emaFast)} vs ${px(v.emaSlow)})`,
+    rsiSide: `RSI ${px(v.rsi, 1)} is below 50`,
+    macdConfirm: `MACD hasn't turned bullish yet (line ${px(v.macdLine)} vs signal ${px(v.macdSignal)}, hist ${px(v.macdHist)})`,
+    volumeBacked: `volume is below its 20-bar average (${vol(v.volume)} vs ${vol(v.volMa)})`,
+  };
+  const PE = {
+    vsVwap: `price is above VWAP (close ${px(v.close)} vs ${px(v.vwap)})`,
+    emaAligned: `EMA 20 is above EMA 50 (${px(v.emaFast)} vs ${px(v.emaSlow)})`,
+    rsiSide: `RSI ${px(v.rsi, 1)} is above 50`,
+    macdConfirm: `MACD hasn't turned bearish yet (line ${px(v.macdLine)} vs signal ${px(v.macdSignal)}, hist ${px(v.macdHist)})`,
+    volumeBacked: `volume is below its 20-bar average (${vol(v.volume)} vs ${vol(v.volMa)})`,
+  };
+  return (side === 'CE' ? CE : PE)[key];
+}
+
+// The side that came closest to a setup (most checks passed; CE on a tie).
+function closestSide(entry) {
+  if (!entry.conditionsBySide) return 'CE';
+  const count = (c) => Object.values(c).filter(Boolean).length;
+  return count(entry.conditionsBySide.PE) > count(entry.conditionsBySide.CE) ? 'PE' : 'CE';
+}
+
+function scoreSummary(score) {
+  const passed = score.checks.filter((c) => c.status === 'pass').length;
+  const notChecked = score.checks.filter((c) => c.status === 'nodata').map((c) => c.label.toLowerCase());
+  let s = `${passed} of ${score.checks.length} checks passed`;
+  if (notChecked.length) s += `, ${notChecked.join(', ')} not checked`;
+  return s;
+}
+
+function entrySummary(entry) {
+  const v = entry.values;
+  if (entry.side === 'PE') {
+    return `price below VWAP, EMA 20 < 50, RSI ${px(v.rsi, 1)}, MACD bearish, volume above MA`;
+  }
+  return `price above VWAP, EMA 20 > 50, RSI ${px(v.rsi, 1)}, MACD bullish, volume above MA`;
+}
+
+// The whole point of this layout: the verdict first, then only the detail
+// that explains it. A trade shows the card up top; a no-trade shows the
+// closest side and why it fell short, in plain words.
 function formatSuggestion(s) {
-  const lines = [`\n== ${s.id} ==`];
-  if (s.asOf) lines.push(`  As of ${s.asOf} (last closed 5m bar)`);
-  if (s.status === 'error' || s.status === 'no-data') {
-    lines.push(`  ${s.reason || 'no data'}`);
+  const lines = [];
+  const head = [`== ${s.id} ==`];
+  if (s.asOf) head.push(s.asOf.replace(' IST', ''));
+  if (s.regime && s.regime.evaluable) {
+    head.push(`${s.regime.label} (ADX ${fmt(+s.regime.features.adx.toFixed(1))})`);
+  }
+  lines.push(term.cyan(head.join('  ·  ')));
+  lines.push('');
+  if (s.status === 'error') {
+    lines.push(term.red(`  ✗ Error — ${s.reason || 'failed'}`));
     return lines.join('\n');
   }
-  if (s.entry) {
-    lines.push(`  Entry: ${s.entry.passed ? `${s.entry.side} ${s.entry.entryType}` : 'no setup'}`);
-    if (s.entry.values) lines.push(...formatEntryChecks(s.entry));
-  }
-  if (s.score) {
-    lines.push(`  Score: ${s.score.score}/${s.score.max} (${s.score.verdict}) — tradeable: ${s.score.tradeable}`);
-    for (const c of s.score.checks) {
-      lines.push(`    ${c.status === 'pass' ? '✓' : c.status === 'fail' ? '✗' : '?'} ${c.label} — ${c.scored}/${c.points}`);
-    }
-  }
-  if (s.regime && s.regime.evaluable) lines.push(`  Regime: ${s.regime.label} (ADX ${fmt(+s.regime.features.adx.toFixed(1))})`);
-  if (s.status === 'no-trade') {
-    if (s.reason) lines.push(`  ${s.reason}`);
-    else lines.push('  No trade — score below the 70 bar or no entry setup.');
+  if (s.status === 'no-data') {
+    lines.push(term.yellow(`  — ${s.reason || 'no data'}`));
     return lines.join('\n');
   }
-  const c = s.card;
-  lines.push(`  SUGGESTION: BUY ${c.ticker}  (expiry ${c.expiry}, lot ${c.lot})`);
-  lines.push(`    Entry ₹${c.ltp}  ·  SL ₹${c.sl} (-${SL_PCT}%)  ·  T1 ₹${c.t1} (+${T1_PCT}%)  ·  T2 ₹${c.t2} (+${T2_PCT}%)`);
-  lines.push(`    Cost/lot ₹${c.costPerLot}  ·  max loss/lot ₹${c.maxLossPerLot}  ·  suggestion only, no order placed`);
+  if (s.status === 'trade') {
+    const c = s.card;
+    lines.push(term.green(term.bold(`  ✓ TRADE: BUY ${c.ticker} — expiry ${c.expiry}, lot ${c.lot}`)));
+    lines.push(`    Entry ₹${c.ltp}  ·  SL ₹${c.sl} (-${SL_PCT}%)  ·  T1 ₹${c.t1} (+${T1_PCT}%)  ·  T2 ₹${c.t2} (+${T2_PCT}%)`);
+    lines.push(`    Cost/lot ₹${c.costPerLot}  ·  max loss/lot ₹${c.maxLossPerLot}`);
+    lines.push('');
+    lines.push(`  Score ${s.score.score}/${s.score.max} (${s.score.verdict}) — ${scoreSummary(s.score)}`);
+    lines.push(`  ${term.green('✓')} All 5 ${s.entry.side} checks passed — ${entrySummary(s.entry)}`);
+    return lines.join('\n');
+  }
+  // No trade.
+  if (s.entry && !s.entry.passed) {
+    const side = closestSide(s.entry);
+    const conds = s.entry.conditionsBySide[side];
+    const passed = Object.values(conds).filter(Boolean).length;
+    const failed = CHECK_KEYS.filter((k) => !conds[k]);
+    const reason = failed.map((k) => checkReason(side, k, s.entry.values)).join('; ');
+    lines.push(term.yellow(term.bold(`  ✗ NO TRADE — ${side} was ${passed} of 5 checks; ${reason}.`)));
+    lines.push(...formatEntryChecksSide(s.entry, side));
+    return lines.join('\n');
+  }
+  // Entry passed but the score is below the 70 bar.
+  const missed = s.score.checks.filter((c) => c.status === 'fail');
+  lines.push(term.yellow(term.bold(`  ✗ NO TRADE — ${s.entry.side} setup found, but score ${s.score.score}/${s.score.max} is below the 70 bar.`)));
+  if (missed.length) {
+    lines.push(`  Missed: ${missed.map((c) => c.label.toLowerCase()).join('; ')}.`);
+  }
+  lines.push(`  Score ${s.score.score}/${s.score.max} (${s.score.verdict}) — ${scoreSummary(s.score)}`);
+  lines.push(`  ${term.green('✓')} All 5 ${s.entry.side} checks passed — ${entrySummary(s.entry)}`);
   return lines.join('\n');
 }
 
