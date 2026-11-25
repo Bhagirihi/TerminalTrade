@@ -9,3 +9,4 @@ Blank branch — V3 starts here.
 - `src/entry-rules.js` — CE/PE setups from the screenshot plan, on 5m candles.
 - `src/trade-score.js` — 0–100 trade quality calculator (pass bar 70).
 - `src/regime.js` — rule-based regime label (trending/sideways × high/low vol); XGBoost-ready features, no model trained yet.
+- `examples/run-rules.js` — run the rules: `node examples/run-rules.js` (demo candles) or `--candles5m 5m.json --candles15m 15m.json` with your own candles.
