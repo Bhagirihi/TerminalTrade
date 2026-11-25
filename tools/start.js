@@ -114,7 +114,7 @@ function render(state, nowMs) {
   const header = [
     `V3 WATCH — ${state.mode} · budget ${state.budget != null ? `₹${inr(state.budget)}` : 'uncapped'} · spent ₹${inr(state.spent)} · left ${state.remaining != null ? `₹${inr(state.remaining)}` : '—'} · feed ${feedStatus} · ${istTimeSecStr(nowMs)} IST`,
     state.funds
-      ? `Upstox funds — available ₹${inr(state.funds.available)} · used ₹${inr(state.funds.used)} · total ₹${inr(state.funds.available + state.funds.used)}`
+      ? `Upstox funds — available ₹${inr(state.funds.available)} · used ₹${inr(state.funds.used)} · total ₹${inr(state.funds.available + state.funds.used)}${state.budget != null ? ` · trade fund ₹${inr(state.budget)}` : ''}`
       : 'Upstox funds — unavailable',
     state.indexLtps && (state.indexLtps.get('NSE_INDEX|Nifty 50') || state.indexLtps.get('NSE_INDEX|Nifty Bank'))
       ? `NIFTY ${state.indexLtps.get('NSE_INDEX|Nifty 50') ? inr(state.indexLtps.get('NSE_INDEX|Nifty 50')) : '—'}  ·  BANKNIFTY ${state.indexLtps.get('NSE_INDEX|Nifty Bank') ? inr(state.indexLtps.get('NSE_INDEX|Nifty Bank')) : '—'}`
@@ -508,12 +508,6 @@ async function main() {
   try {
     indexLtps = await api.getLtps(['NSE_INDEX|Nifty 50', 'NSE_INDEX|Nifty Bank']);
   } catch (_) { /* header omits the levels */ }
-  if (funds) {
-    const total = funds.available + funds.used;
-    console.log(`Upstox funds — available ₹${inr(funds.available)} · used ₹${inr(funds.used)} · total ₹${inr(total)}`);
-  } else {
-    console.log('Upstox funds — unavailable');
-  }
   const nifty = indexLtps.get('NSE_INDEX|Nifty 50');
   const bank = indexLtps.get('NSE_INDEX|Nifty Bank');
   if (nifty || bank) {
@@ -530,6 +524,14 @@ async function main() {
   const mode = live ? 'LIVE' : 'PAPER';
   const budget = await askBudget(funds ? funds.available : null);
   if (budget != null) console.log(`Trading budget for today: ₹${inr(budget)}`);
+  // Funds line prints here (not earlier) so it can carry the trade fund
+  // — the budget you just entered.
+  if (funds) {
+    const total = funds.available + funds.used;
+    console.log(`Upstox funds — available ₹${inr(funds.available)} · used ₹${inr(funds.used)} · total ₹${inr(total)}${budget != null ? ` · trade fund ₹${inr(budget)}` : ''}`);
+  } else {
+    console.log('Upstox funds — unavailable');
+  }
   console.log(live
     ? 'LIVE mode — the loop will place real market orders (BUY + SL-M) when a setup appears, within your budget.'
     : 'Paper trading only — no live orders placed. Run `npm run paper` to see how they did.');
@@ -608,13 +610,36 @@ async function main() {
   console.log(`Watching the market (${mode}) — every ${POLL_MS / 1000}s. Ctrl+C stops and squares off.`);
   let stop = false;
   let timer = null;
-  const stopLoop = () => { stop = true; if (timer) clearTimeout(timer); };
+  let wakeUp = null;
+  let sigintCount = 0;
+  const stopLoop = () => {
+    sigintCount += 1;
+    if (sigintCount > 1) {
+      // Second ^C: stop waiting for a graceful shutdown and exit now.
+      // Any open live position keeps its broker SL-M as protection.
+      console.log('Force quitting — open live positions keep their broker SL-M.');
+      process.exit(130);
+    }
+    stop = true;
+    feed.stop();
+    if (timer) clearTimeout(timer);
+    // The 30s sleep is a promise resolved by its timer — clearing the
+    // timer alone never resolves it, so ^C used to hang here forever.
+    // Resolving it lets the loop see `stop` and shut down.
+    if (wakeUp) wakeUp();
+    // Safety net: a stuck tick or square-off must not hang the process
+    // forever. Unref'd, so a clean shutdown still exits promptly.
+    const force = setTimeout(() => process.exit(130), 20000);
+    force.unref();
+  };
   process.on('SIGINT', stopLoop);
   process.on('SIGTERM', stopLoop);
   while (!stop) {
     const done = await tick(state, api, Date.now());
     if (done === 'done' || stop) break;
-    await new Promise((r) => { timer = setTimeout(r, POLL_MS); });
+    await new Promise((r) => { wakeUp = r; timer = setTimeout(r, POLL_MS); });
+    wakeUp = null;
+    timer = null;
   }
   if (stop) log(state, 'Stopping — squaring off all open positions.');
   await squareOffAll(state, api, Date.now());
