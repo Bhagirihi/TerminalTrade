@@ -28,6 +28,7 @@ const { indicatorValues } = require('../src/entry-rules');
 const { nearestStepStrike } = require('../src/strikes');
 const { loadPaperTrades, savePaperTrades, recordPaperTrade, hasOpenTradeFor, closePaperTrade } = require('../src/paper');
 const { loadLiveTrades, saveLiveTrades, recordLiveTrade, placeLiveEntry, syncLivePositions, exitLivePosition } = require('../src/trading');
+const { writeDailyRecord } = require('../src/daily');
 const { optionsNetPnl } = require('../src/charges');
 const { MarketFeed } = require('../src/market-feed');
 const { istDateKey, istParts, istTimeSecStr, istFullSecStr } = require('../src/time');
@@ -167,6 +168,7 @@ async function enterTrade(state, api, s, nowMs) {
     if (state.remaining != null) state.remaining = Math.max(0, +(state.remaining - trade.totalCost).toFixed(2));
     if (state.feed) state.feed.subscribe([trade.instrumentKey]);
     log(state, `PAPER BUY ${trade.ticker} ${trade.lots} lot${trade.lots > 1 ? 's' : ''} @ ₹${trade.entry} (total ₹${inr(trade.totalCost)})`);
+    try { writeDailyRecord(today, { budget: state.budget }); } catch (_) { /* daily file is best-effort */ }
     return;
   }
   // LIVE
@@ -203,6 +205,7 @@ async function enterTrade(state, api, s, nowMs) {
     if (state.remaining != null) state.remaining = Math.max(0, +(state.remaining - trade.totalCost).toFixed(2));
     if (state.feed) state.feed.subscribe([trade.instrumentKey]);
     log(state, `LIVE BUY ${trade.ticker} ${trade.lots} lot${trade.lots > 1 ? 's' : ''} @ ₹${trade.entry} (order ${trade.buyOrderId}, total ₹${inr(trade.totalCost)})${trade.slmOrderId ? ` — SL-M ${trade.slmOrderId}` : ' — SL-M FAILED, loop monitor is the only stop'}`);
+    try { writeDailyRecord(today, { budget: state.budget }); } catch (_) { /* daily file is best-effort */ }
   } catch (e) {
     log(state, `LIVE BUY FAILED ${s.card.ticker}: ${e.message || e} — no position taken`);
     state.tradedToday.delete(key); // a failed buy does not burn the day's chance
@@ -214,6 +217,36 @@ function maybeUnsubscribe(state, key) {
   const stillOpen = [...state.positions.live, ...state.positions.paper]
     .some((p) => p.status === 'OPEN' && p.instrumentKey === key);
   if (!stillOpen) state.feed.unsubscribe([key]);
+}
+
+// Return a closed trade's net proceeds to the day's budget so the loop can
+// trade again after a close: remaining += entry cost + net P&L (the exit
+// value minus charges), spent -= the same, so spent + remaining == budget
+// always. A win can push remaining above the budget — that is real profit,
+// not a bug. Guarded by state.creditedCloses so a position is credited
+// exactly once even if two paths see the same close.
+function creditClose(state, pos) {
+  if (!pos) return;
+  if (!state.creditedCloses) state.creditedCloses = new Set();
+  if (state.creditedCloses.has(pos.id)) return;
+  state.creditedCloses.add(pos.id);
+  const entryCost = Number(pos.totalCost) || (Number(pos.qty) || 0) * (Number(pos.entry) || 0);
+  const net = Number(pos.netPnl) || 0;
+  const credit = +(entryCost + net).toFixed(2);
+  state.spent = +(state.spent - credit).toFixed(2);
+  if (state.remaining != null) state.remaining = +(state.remaining + credit).toFixed(2);
+}
+
+// After a close: recycle the budget and refresh the stored daily record
+// for the trade's date. The daily write is best-effort — a disk failure
+// must not break the watch loop, so it only logs.
+function noteClosedTrade(state, pos) {
+  creditClose(state, pos);
+  try {
+    writeDailyRecord(pos.date, { budget: state.budget });
+  } catch (e) {
+    log(state, `daily record write failed for ${pos.date}: ${e.message || e}`);
+  }
 }
 
 // Check one open position against a fresh LTP — from a feed tick (realtime)
@@ -241,11 +274,13 @@ async function checkPositionQuote(state, api, pos, kind, ltp, nowMs) {
       closePaperTrade(pos, pos.sl, 'SL', nowMs);
       log(state, `PAPER ${pos.ticker} closed SL @ ₹${pos.exit} — net ₹${inr(pos.netPnl)}`);
       saveLedger();
+      noteClosedTrade(state, pos);
       maybeUnsubscribe(state, pos.instrumentKey);
     } else if (ltp >= pos.t2) {
       closePaperTrade(pos, pos.t2, 'T2', nowMs);
       log(state, `PAPER ${pos.ticker} closed T2 @ ₹${pos.exit} — net ₹${inr(pos.netPnl)}`);
       saveLedger();
+      noteClosedTrade(state, pos);
       maybeUnsubscribe(state, pos.instrumentKey);
     }
     return;
@@ -258,6 +293,7 @@ async function checkPositionQuote(state, api, pos, kind, ltp, nowMs) {
       if (r.ok) {
         log(state, `LIVE ${pos.ticker} closed T2 @ ₹${r.exit} — net ₹${inr(pos.netPnl)}`);
         saveLedger();
+        noteClosedTrade(state, pos);
         maybeUnsubscribe(state, pos.instrumentKey);
       } else {
         log(state, `LIVE ${pos.ticker} T2 exit skipped: ${r.reason}`);
@@ -276,6 +312,7 @@ async function checkPositionQuote(state, api, pos, kind, ltp, nowMs) {
       if (r.ok) {
         log(state, `LIVE ${pos.ticker} closed SL @ ₹${r.exit} — net ₹${inr(pos.netPnl)} (no SL-M existed)`);
         saveLedger();
+        noteClosedTrade(state, pos);
         maybeUnsubscribe(state, pos.instrumentKey);
       } else {
         log(state, `LIVE ${pos.ticker} SL exit skipped: ${r.reason}`);
@@ -298,6 +335,7 @@ async function monitorPositions(state, api, nowMs) {
       const closed = await syncLivePositions(api, state.positions.live);
       for (const c of closed) {
         log(state, `LIVE ${c.ticker} closed SL-M @ ₹${c.exit} — net ₹${inr(c.netPnl)}`);
+        noteClosedTrade(state, c);
         maybeUnsubscribe(state, c.instrumentKey);
       }
     } catch (e) {
@@ -331,6 +369,7 @@ async function monitorPositions(state, api, nowMs) {
 
 // Square off every open position (15:15, or when the loop stops).
 async function squareOffAll(state, api, nowMs) {
+  const closedNow = [];
   let liveChanged = false;
   for (const pos of state.positions.live) {
     if (pos.status !== 'OPEN') continue;
@@ -339,6 +378,7 @@ async function squareOffAll(state, api, nowMs) {
       if (r.ok) {
         log(state, `LIVE ${pos.ticker} squared off @ ₹${r.exit} — net ₹${inr(pos.netPnl)}`);
         liveChanged = true;
+        closedNow.push(pos);
         maybeUnsubscribe(state, pos.instrumentKey);
       } else log(state, `LIVE ${pos.ticker} square-off skipped: ${r.reason} — STILL OPEN, check Upstox`);
     } catch (e) {
@@ -351,6 +391,7 @@ async function squareOffAll(state, api, nowMs) {
     closePaperTrade(pos, Number.isFinite(pos.liveLtp) ? pos.liveLtp : pos.entry, '15:15', nowMs);
     log(state, `PAPER ${pos.ticker} squared off @ ₹${pos.exit} — net ₹${inr(pos.netPnl)}`);
     paperChanged = true;
+    closedNow.push(pos);
     maybeUnsubscribe(state, pos.instrumentKey);
   }
   if (liveChanged) saveLiveTrades(loadLiveTrades().map((t) => {
@@ -361,6 +402,9 @@ async function squareOffAll(state, api, nowMs) {
     const cur = state.positions.paper.find((p) => p.id === t.id);
     return cur || t;
   }));
+  // Recycle the budget and refresh the daily records once the ledger
+  // saves above have landed, so the daily files read the closed trades.
+  for (const p of closedNow) noteClosedTrade(state, p);
 }
 
 // One watch tick. Returns 'done' when the market day is over.
@@ -625,6 +669,7 @@ async function main() {
       paper: loadPaperTrades().filter((t) => t.status === 'OPEN' && t.date === today),
     },
     tradedToday: new Set(),
+    creditedCloses: new Set(),
     lastBar: {},
     lastCards: {},
     warmBook: {},
@@ -648,6 +693,7 @@ async function main() {
   if (once) {
     await tick(state, api, Date.now());
     console.log(daySummary(state));
+    try { writeDailyRecord(istDateKey(Date.now()), { budget: state.budget }); } catch (_) { /* daily file is best-effort */ }
     feed.stop();
     return;
   }
@@ -690,6 +736,7 @@ async function main() {
   await squareOffAll(state, api, Date.now());
   render(state, Date.now());
   console.log(daySummary(state));
+  try { writeDailyRecord(istDateKey(Date.now()), { budget: state.budget }); } catch (_) { /* daily file is best-effort */ }
   feed.stop();
 }
 
@@ -700,4 +747,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { tick, enterTrade, monitorPositions, squareOffAll, checkPositionQuote, warmLiquidityBand, updateLiveValues, marketOpen, render, daySummary };
+module.exports = { tick, enterTrade, monitorPositions, squareOffAll, checkPositionQuote, creditClose, noteClosedTrade, warmLiquidityBand, updateLiveValues, marketOpen, render, daySummary };

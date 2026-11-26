@@ -14,6 +14,7 @@ const { UpstoxApi } = require('../src/upstox-api');
 const { loadPaperTrades, savePaperTrades, closePaperTrade } = require('../src/paper');
 const { optionsNetPnl } = require('../src/charges');
 const { istDateKey } = require('../src/time');
+const { writeDailyRecord } = require('../src/daily');
 
 function inr(n) {
   return Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -58,7 +59,19 @@ async function main() {
     t.liveLtp = last ? last.close : null;
     t.t1Hit = todayBars.some((b) => b.high >= t.t1);
   }
-  if (changed) savePaperTrades(trades);
+  if (changed) {
+    savePaperTrades(trades);
+    // Refresh the stored daily record for every day touched, so the
+    // daily files agree with the ledger even for closes done here.
+    for (const d of [...new Set(trades.map((t) => t.date))]) {
+      try {
+        writeDailyRecord(d);
+        console.log(`Daily record updated: daily/${d}.json`);
+      } catch (e) {
+        console.log(`Daily record write failed for ${d}: ${e.message || e}`);
+      }
+    }
+  }
 
   const open = trades.filter((t) => t.status === 'OPEN');
   const closed = trades.filter((t) => t.status === 'CLOSED');
