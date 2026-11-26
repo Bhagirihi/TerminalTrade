@@ -338,11 +338,17 @@ function formatSuggestion(s) {
     if (ll) lines.push(ll);
     return term.card(title, lines);
   }
-  // Entry passed but the score is below the 70 bar.
+  // Entry passed but no trade: either the score is below the 70 bar, or
+  // a sizing/premium block (s.reason) stopped it. Show the real reason —
+  // the score message is a lie for a budget block (score 70 IS the bar).
   const missed = s.score.checks.filter((c) => c.status === 'fail');
-  lines.push(term.yellow(term.bold(`\u2717 NO TRADE \u2014 ${s.entry.side} setup found, but score ${s.score.score}/${s.score.max} is below the 70 bar.`)));
-  if (missed.length) {
-    lines.push(`Missed: ${missed.map((c) => c.label.toLowerCase()).join('; ')}.`);
+  if (s.reason) {
+    lines.push(term.yellow(term.bold(`\u2717 NO TRADE \u2014 ${s.entry.side} setup found, but ${s.reason}.`)));
+  } else {
+    lines.push(term.yellow(term.bold(`\u2717 NO TRADE \u2014 ${s.entry.side} setup found, but score ${s.score.score}/${s.score.max} is below the 70 bar.`)));
+    if (missed.length) {
+      lines.push(`Missed: ${missed.map((c) => c.label.toLowerCase()).join('; ')}.`);
+    }
   }
   lines.push(`Score ${s.score.score}/${s.score.max} (${s.score.verdict}) \u2014 ${scoreSummary(s.score)}`);
   lines.push(`${term.green('\u2713')} All 5 ${s.entry.side} checks passed \u2014 ${entrySummary(s.entry)}`);
