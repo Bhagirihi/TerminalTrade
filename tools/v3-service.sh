@@ -26,12 +26,17 @@ find_node() {
   return 1
 }
 
-# The loop's own command line is exactly `node <path>/tools/start.js`
-# (plus --service for the service copy). Anchored on `node` so a shell
-# whose command merely mentions the path (a grep, a --check, an editor)
-# never counts as a running loop.
-LOOP_PATTERN='^node [^ ]*/tools/start\.js( --service)?$'
-SERVICE_PATTERN='^node [^ ]*/tools/start\.js --service$'
+# The loop's command line is `node tools/start.js` (plus --service for
+# the service copy) — but the service starts it through the absolute node
+# path (`/usr/bin/node ...`), and the path to start.js is relative, so
+# the match must allow an optional `/.../` before `node` and an optional
+# `<dir>/` before `tools/start.js`. It still requires `node` to be the
+# command itself (start of line or right after a `/`), so a shell whose
+# command merely mentions the path (a grep, a --check, an editor) never
+# counts as a running loop. The old patterns anchored on `^node` and
+# demanded a `/tools/` prefix, so they never matched a real loop at all.
+LOOP_PATTERN='(^|/)node ([^ ]*/)?tools/start\.js( --service)?$'
+SERVICE_PATTERN='(^|/)node ([^ ]*/)?tools/start\.js --service$'
 
 is_running() { pgrep -f "$LOOP_PATTERN" >/dev/null 2>&1; }
 running_pid() { pgrep -f "$LOOP_PATTERN" | head -1; }
