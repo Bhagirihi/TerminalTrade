@@ -34,7 +34,7 @@ const { writeDailyRecord, readDailyRecord, latestDailyRecord } = require('../src
 const { optionsNetPnl } = require('../src/charges');
 const { MarketFeed } = require('../src/market-feed');
 const { card } = require('../src/terminal');
-const { istDateKey, istParts, istTimeSecStr, istFullSecStr } = require('../src/time');
+const { istDateKey, istParts, istTimeSecStr, istFullSecStr, istShortDateTime } = require('../src/time');
 
 const POLL_MS = 30000;
 const SQUARE_OFF_MIN = 15 * 60 + 15; // 15:15 IST
@@ -102,7 +102,8 @@ function positionLines(state) {
   ];
   if (!all.length) return out;
   for (const p of all) {
-    let line = `${p.kind} ${p.ticker} — ${p.lots} lot${p.lots > 1 ? 's' : ''} @ ₹${p.entry}, SL ₹${p.sl}, T1 ₹${p.t1}, T2 ₹${p.t2}`;
+    const when = istShortDateTime(p.recordedAt);
+    let line = `${p.kind} ${p.ticker}${when ? ` · ${when}` : ''} — ${p.lots} lot${p.lots > 1 ? 's' : ''} @ ₹${p.entry}, SL ₹${p.sl}, T1 ₹${p.t1}, T2 ₹${p.t2}`;
     if (Number.isFinite(p.liveLtp)) {
       const { gross, net } = optionsNetPnl(p.qty, p.entry, p.liveLtp);
       line += ` — live ₹${p.liveLtp}, P&L gross ₹${inr(gross)} / net ₹${inr(net)}${p.t1Hit ? ' (T1 hit)' : ''}`;

@@ -40,6 +40,17 @@ function istFullStr(epochMs) {
   return `${istDateKey(epochMs)} ${istTimeStr(epochMs)} IST`;
 }
 
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// Short IST date + time for a position row: '27 Nov 09:05'. Accepts an
+// epoch-ms number or an ISO string; null when unparseable.
+function istShortDateTime(v) {
+  const ms = typeof v === 'number' ? v : Date.parse(v);
+  if (!Number.isFinite(ms)) return null;
+  const p = istParts(ms);
+  return `${p.day} ${MONTHS[p.month - 1]} ${pad(p.hour)}:${pad(p.minute)}`;
+}
+
 /** Date + time with seconds (order / signal stamps). */
 function istFullSecStr(epochMs = Date.now()) {
   const ms = Number(epochMs);
@@ -61,5 +72,6 @@ module.exports = {
   istTimeSecStr,
   istFullStr,
   istFullSecStr,
+  istShortDateTime,
   istToEpoch,
 };
