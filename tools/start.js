@@ -172,6 +172,10 @@ function render(state, nowMs) {
 // own box, a blank line, then the log in its own box. (Positions are
 // today's only — the loop only ever resumes today's ledgers — and the box
 // is titled with the session mode, so a paper day reads PAPER.)
+// The LOG box shows the day's recent history, not just the last few
+// lines — 12 lines, fetched from the daily log file on restart, so the
+// morning's lines are still visible in the afternoon.
+const LOG_TAIL_LINES = 12;
 function screenBlocks(state) {
   const out = [];
   const rows = positionLines(state);
@@ -179,7 +183,7 @@ function screenBlocks(state) {
     out.push(card(`OPEN POSITIONS (${rows.length}) · ${state.mode}`, rows));
     out.push('');
   }
-  const tail = state.log.slice(-6).map((l) => `${l.time} ${l.msg}`);
+  const tail = state.log.slice(-LOG_TAIL_LINES).map((l) => `${l.time} ${l.msg}`);
   if (tail.length) out.push(card('LOG', tail));
   return out;
 }
