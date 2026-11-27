@@ -27,6 +27,7 @@ const { UpstoxApi } = require('../src/upstox-api');
 const { suggestAll, formatSuggestion, loadOptionBook, atmBandKeys, UNDERLYINGS } = require('../src/suggest');
 const { spreadOk } = require('../src/trade-score');
 const { indicatorValues } = require('../src/entry-rules');
+const { classifyRegime } = require('../src/regime');
 const { nearestStepStrike } = require('../src/strikes');
 const { loadPaperTrades, savePaperTrades, recordPaperTrade, hasOpenTradeFor, closePaperTrade } = require('../src/paper');
 const { loadLiveTrades, saveLiveTrades, recordLiveTrade, placeLiveEntry, syncLivePositions, exitLivePosition } = require('../src/trading');
@@ -96,10 +97,15 @@ function log(state, msg) {
 
 function positionLines(state) {
   const out = [];
+  // Only OPEN rows: a close mutates the position's status in place but
+  // never removes it from state.positions, so without this filter a
+  // closed trade kept showing in the box with a phantom live P&L
+  // (seen 27 Nov: the 25850 PE showed open at -693.41 after its SL
+  // close at -669.40 had already been logged).
   const all = [
     ...state.positions.live.map((p) => ({ ...p, kind: 'LIVE' })),
     ...state.positions.paper.map((p) => ({ ...p, kind: 'PAPER' })),
-  ];
+  ].filter((p) => p.status !== 'CLOSED' && p.status !== 'EXPIRED');
   if (!all.length) return out;
   for (const p of all) {
     const when = istShortDateTime(p.recordedAt);
@@ -463,6 +469,15 @@ function updateLiveValues(state, id) {
   if (!bars5 || bars5.length < 60 || !forming) return;
   const live = indicatorValues([...bars5, forming]);
   if (live) {
+    // Live regime too, on the same forming bar: ADX + ATR% so the card's
+    // ADX reading moves tick-by-tick like the four checks do. Display
+    // only — the card title and every entry decision still use the
+    // closed bars, and a missing/unreadable regime simply shows nothing.
+    const regime = classifyRegime([...bars5, forming]);
+    if (regime && regime.evaluable) {
+      live.adx = regime.features.adx;
+      live.atrPct = regime.features.atrPct;
+    }
     state.liveValues[id] = live;
     if (state.lastCards[id]) state.lastCards[id].live = live;
   }

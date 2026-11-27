@@ -286,7 +286,9 @@ function liveLine(live, side) {
     mark(fin(v.rsi) ? (bull ? v.rsi > 50 : v.rsi < 50) : undefined),
     mark(fin(v.macdLine, v.macdSignal, v.macdHist) ? (bull ? v.macdLine > v.macdSignal && v.macdHist > 0 : v.macdLine < v.macdSignal && v.macdHist < 0) : undefined),
   ];
-  return `LIVE forming bar \u2014 ${m[0]} VWAP ${m[1]} EMA ${m[2]} RSI ${m[3]} MACD \u00b7 close ${px(v.close)} vs VWAP ${px(v.vwap)} (not a signal)`;
+  const adxTxt = Number.isFinite(v.adx) ? ` \u00b7 ADX ${px(v.adx, 1)}` : '';
+  const atrTxt = Number.isFinite(v.atrPct) ? ` \u00b7 ATR ${px(v.atrPct, 2)}%` : '';
+  return `LIVE forming bar \u2014 ${m[0]} VWAP ${m[1]} EMA ${m[2]} RSI ${m[3]} MACD \u00b7 close ${px(v.close)} vs VWAP ${px(v.vwap)}${adxTxt}${atrTxt} (not a signal)`;
 }
 
 function formatSuggestion(s) {
