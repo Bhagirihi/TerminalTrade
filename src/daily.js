@@ -21,6 +21,25 @@ function readDailyRecord(date) {
   try { return JSON.parse(fs.readFileSync(dailyFile(date), 'utf8')); } catch (_) { return null; }
 }
 
+// The most recent daily record before the given date that already knows a
+// mode and a budget (or null). Used to carry a day's settings forward so a
+// fresh day can start on its own with the last day's mode and budget.
+function latestDailyRecord(beforeDate) {
+  let files = [];
+  try { files = fs.readdirSync(DAILY_DIR); } catch (_) { return null; }
+  const dates = files
+    .filter((f) => /^\d{4}-\d{2}-\d{2}\.json$/.test(f))
+    .map((f) => f.slice(0, 10))
+    .filter((d) => d < beforeDate)
+    .sort()
+    .reverse();
+  for (const d of dates) {
+    const rec = readDailyRecord(d);
+    if (rec && rec.mode != null && rec.budget != null) return rec;
+  }
+  return null;
+}
+
 function summarize(trades) {
   const closed = trades.filter((t) => t.status === 'CLOSED');
   const open = trades.filter((t) => t.status === 'OPEN');
@@ -86,4 +105,4 @@ function writeDailyRecord(date, opts = {}) {
   return rec;
 }
 
-module.exports = { DAILY_DIR, dailyFile, readDailyRecord, buildDailyRecord, writeDailyRecord };
+module.exports = { DAILY_DIR, dailyFile, readDailyRecord, latestDailyRecord, buildDailyRecord, writeDailyRecord };

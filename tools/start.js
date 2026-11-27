@@ -30,7 +30,7 @@ const { indicatorValues } = require('../src/entry-rules');
 const { nearestStepStrike } = require('../src/strikes');
 const { loadPaperTrades, savePaperTrades, recordPaperTrade, hasOpenTradeFor, closePaperTrade } = require('../src/paper');
 const { loadLiveTrades, saveLiveTrades, recordLiveTrade, placeLiveEntry, syncLivePositions, exitLivePosition } = require('../src/trading');
-const { writeDailyRecord, readDailyRecord } = require('../src/daily');
+const { writeDailyRecord, readDailyRecord, latestDailyRecord } = require('../src/daily');
 const { optionsNetPnl } = require('../src/charges');
 const { MarketFeed } = require('../src/market-feed');
 const { istDateKey, istParts, istTimeSecStr, istFullSecStr } = require('../src/time');
@@ -584,11 +584,19 @@ function deriveDayState(today, budget) {
 }
 
 // Today's stored session (mode + budget) plus the ledger-derived state.
-// Null when the day has no daily record yet — the first run of the day.
+// When today has no session stored yet, the most recent earlier day's mode
+// and budget carry forward — so a fresh day can start on its own with the
+// last day's settings, and the morning is just the login. Spent/left still
+// come from TODAY's ledgers (empty on a fresh morning). Null only when no
+// day has ever stored a session — the very first run.
 function loadDayState(today) {
   const rec = readDailyRecord(today);
-  if (!rec || rec.mode == null || rec.budget == null) return null;
-  return { mode: rec.mode, budget: rec.budget, ...deriveDayState(today, rec.budget) };
+  if (rec && rec.mode != null && rec.budget != null) {
+    return { mode: rec.mode, budget: rec.budget, carriedFrom: null, ...deriveDayState(today, rec.budget) };
+  }
+  const prev = latestDailyRecord(today);
+  if (!prev || prev.mode == null || prev.budget == null) return null;
+  return { mode: prev.mode, budget: prev.budget, carriedFrom: prev.date, ...deriveDayState(today, prev.budget) };
 }
 
 async function main() {
@@ -681,7 +689,7 @@ async function runMain() {
     if (restored) {
       ({ mode, budget } = restored);
       dayState = restored;
-      console.log(`Resuming today's ${mode} session — budget ₹${inr(budget)}, spent ₹${inr(restored.spent)}, left ₹${inr(restored.remaining)}, ${restored.tradedCount} trade(s) today (${restored.openCount} open).`);
+      console.log(`Resuming today's ${mode} session — budget ₹${inr(budget)}${restored.carriedFrom ? ` (carried forward from ${restored.carriedFrom})` : ''}, spent ₹${inr(restored.spent)}, left ₹${inr(restored.remaining)}, ${restored.tradedCount} trade(s) today (${restored.openCount} open).`);
     }
   }
   if (mode == null) {
