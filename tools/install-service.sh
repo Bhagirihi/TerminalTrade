@@ -20,6 +20,10 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 MARKER="# v3-watchdog"
 LINE="*/5 * * * 1-5 bash $REPO/tools/v3-service.sh watchdog $MARKER"
 mkdir -p "$REPO/logs"
+# GitHub pushes strip the executable bit, so restore it here — otherwise
+# `./tools/v3-service.sh stop` fails with "Permission denied" and the
+# scripts only work with an explicit `bash` in front.
+chmod +x "$REPO/tools/v3-service.sh" "$REPO/tools/install-service.sh"
 
 if command -v node >/dev/null 2>&1; then NODE="$(command -v node)"
 elif [ -x /usr/local/bin/node ]; then NODE=/usr/local/bin/node
