@@ -15,7 +15,7 @@ const { evaluateEntry } = require('./entry-rules');
 const { scoreTrade } = require('./trade-score');
 const { classifyRegime } = require('./regime');
 const { nearestListedStrike, nearestStepStrike } = require('./strikes');
-const { istDateKey, istTimeStr } = require('./time');
+const { istDateKey, istTimeStr, istShortDateTime } = require('./time');
 const term = require('./terminal');
 
 const CHECK_KEYS = ['vsVwap', 'emaAligned', 'rsiSide', 'macdConfirm', 'volumeBacked'];
@@ -313,7 +313,18 @@ function formatSuggestion(s) {
   const ll = liveSide ? liveLine(s.live, liveSide) : null;
   if (s.status === 'trade') {
     const c = s.card;
+    // A setup the loop deliberately did NOT buy (already traded today,
+    // position already open, past square-off): the card must not read as
+    // a buy. Show why it was skipped instead of the entry/cost lines.
+    if (s.skippedReason) {
+      lines.push(term.yellow(term.bold(`\u2717 NO TRADE \u2014 ${c.ticker} setup found, but ${s.skippedReason}.`)));
+      lines.push(`Score ${s.score.score}/${s.score.max} (${s.score.verdict}) \u2014 ${scoreSummary(s.score)}`);
+      lines.push(`${term.green('\u2713')} All 5 ${s.entry.side} checks passed \u2014 ${entrySummary(s.entry)}`);
+      if (ll) lines.push(ll);
+      return term.card(title, lines);
+    }
     lines.push(term.green(term.bold(`\u2713 TRADE: BUY ${c.ticker} \u2014 expiry ${c.expiry}, lot ${c.lot}`)));
+    if (Number.isFinite(s.generatedAtMs)) lines.push(`  Generated ${istShortDateTime(s.generatedAtMs)} IST`);
     lines.push(`  Entry \u20b9${c.ltp}  \u00b7  SL \u20b9${c.sl} (-${SL_PCT}%)  \u00b7  T1 \u20b9${c.t1} (+${T1_PCT}%)  \u00b7  T2 \u20b9${c.t2} (+${T2_PCT}%)`);
     const costLine = c.lots
       ? `  Cost/lot \u20b9${c.costPerLot} \u00b7 ${c.lots} lot${c.lots > 1 ? 's' : ''} (${c.qty} qty) \u00b7 total \u20b9${c.totalCost} \u00b7 max loss \u20b9${c.maxLoss}${c.budgetLeft != null ? ` \u00b7 budget left \u20b9${c.budgetLeft}` : ''}`

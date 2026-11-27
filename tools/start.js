@@ -531,11 +531,16 @@ async function tick(state, api, nowMs) {
     state.lastCards[s.id] = s;
     if (s.bars5) { if (!state.bars5) state.bars5 = {}; state.bars5[s.id] = s.bars5; }
     if (s.asOf === prevBar) continue; // same 5m bar — nothing new to act on
+    s.generatedAtMs = nowMs; // when this evaluation ran — the trade card shows it
     log(state, `${s.id}: ${s.status === 'trade' ? `TRADE ${s.card.ticker} ${s.score.score}/100` : s.status === 'no-trade' ? 'no setup' : s.status} (new 5m bar ${s.asOf})`);
     if (s.status !== 'trade') continue;
-    if (mins >= SQUARE_OFF_MIN) continue; // past square-off, no new entries
-    if (state.tradedToday.has(`${s.card.ticker}|${s.card.expiry}`)) continue;
-    if (state.positions.live.concat(state.positions.paper).some((pos) => pos.status === 'OPEN' && pos.ticker === s.card.ticker && pos.expiry === s.card.expiry)) continue;
+    // A tradeable setup the loop will NOT buy still gets its reason on
+    // the card — otherwise the card reads "TRADE: BUY" for a buy that
+    // never happened (seen 27 Nov: the 25850 PE re-fired at 10:21 after
+    // its 09:57 SL close, and the card looked like a second buy).
+    if (mins >= SQUARE_OFF_MIN) { s.skippedReason = 'past the 15:15 square-off'; continue; }
+    if (state.tradedToday.has(`${s.card.ticker}|${s.card.expiry}`)) { s.skippedReason = 'already traded today'; continue; }
+    if (state.positions.live.concat(state.positions.paper).some((pos) => pos.status === 'OPEN' && pos.ticker === s.card.ticker && pos.expiry === s.card.expiry)) { s.skippedReason = 'position already open'; continue; }
     await enterTrade(state, api, s, nowMs);
   }
 
