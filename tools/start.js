@@ -33,6 +33,7 @@ const { loadLiveTrades, saveLiveTrades, recordLiveTrade, placeLiveEntry, syncLiv
 const { writeDailyRecord, readDailyRecord, latestDailyRecord } = require('../src/daily');
 const { optionsNetPnl } = require('../src/charges');
 const { MarketFeed } = require('../src/market-feed');
+const { card } = require('../src/terminal');
 const { istDateKey, istParts, istTimeSecStr, istFullSecStr } = require('../src/time');
 
 const POLL_MS = 30000;
@@ -100,9 +101,8 @@ function positionLines(state) {
     ...state.positions.paper.map((p) => ({ ...p, kind: 'PAPER' })),
   ];
   if (!all.length) return out;
-  out.push(`OPEN POSITIONS (${all.length}):`);
   for (const p of all) {
-    let line = `  ${p.kind} ${p.ticker} — ${p.lots} lot${p.lots > 1 ? 's' : ''} @ ₹${p.entry}, SL ₹${p.sl}, T1 ₹${p.t1}, T2 ₹${p.t2}`;
+    let line = `${p.kind} ${p.ticker} — ${p.lots} lot${p.lots > 1 ? 's' : ''} @ ₹${p.entry}, SL ₹${p.sl}, T1 ₹${p.t1}, T2 ₹${p.t2}`;
     if (Number.isFinite(p.liveLtp)) {
       const { gross, net } = optionsNetPnl(p.qty, p.entry, p.liveLtp);
       line += ` — live ₹${p.liveLtp}, P&L gross ₹${inr(gross)} / net ₹${inr(net)}${p.t1Hit ? ' (T1 hit)' : ''}`;
@@ -125,16 +125,30 @@ function render(state, nowMs) {
       : '',
   ].filter(Boolean);
   const cards = Object.values(state.lastCards).map((s) => formatSuggestion(s));
-  const positions = positionLines(state);
-  const tail = state.log.slice(-6).map((l) => `${l.time} ${l.msg}`);
   if (process.stdout.isTTY) {
     process.stdout.write('\x1b[2J\x1b[0;0H');
-    console.log([...header, ...cards, ...positions, ...tail].join('\n'));
+    console.log([...header, ...cards, ...screenBlocks(state)].join('\n'));
   } else {
     const fresh = state.log.slice(state.printedLog || 0);
     state.printedLog = state.log.length;
     for (const l of fresh) console.log(`${l.time} ${l.msg}`);
   }
+}
+
+// TTY-only blocks after the index cards: today's open positions in their
+// own box, a blank line, then the log in its own box. (Positions are
+// today's only — the loop only ever resumes today's ledgers — and the box
+// is titled with the session mode, so a paper day reads PAPER.)
+function screenBlocks(state) {
+  const out = [];
+  const rows = positionLines(state);
+  if (rows.length) {
+    out.push(card(`OPEN POSITIONS (${rows.length}) · ${state.mode}`, rows));
+    out.push('');
+  }
+  const tail = state.log.slice(-6).map((l) => `${l.time} ${l.msg}`);
+  if (tail.length) out.push(card('LOG', tail));
+  return out;
 }
 
 async function enterTrade(state, api, s, nowMs) {
@@ -849,4 +863,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { tick, enterTrade, monitorPositions, squareOffAll, checkPositionQuote, creditClose, noteClosedTrade, warmLiquidityBand, updateLiveValues, marketOpen, render, daySummary, loadDayState, deriveDayState, acquireLock, releaseLock };
+module.exports = { tick, enterTrade, monitorPositions, squareOffAll, checkPositionQuote, creditClose, noteClosedTrade, warmLiquidityBand, updateLiveValues, marketOpen, render, screenBlocks, positionLines, daySummary, loadDayState, deriveDayState, acquireLock, releaseLock };
