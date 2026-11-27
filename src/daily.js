@@ -16,6 +16,11 @@ const { loadLiveTrades } = require('./trading');
 const DAILY_DIR = path.join(__dirname, '..', 'daily');
 const dailyFile = (date) => path.join(DAILY_DIR, `${date}.json`);
 
+// Today's stored record, or null when the day has none yet (first run).
+function readDailyRecord(date) {
+  try { return JSON.parse(fs.readFileSync(dailyFile(date), 'utf8')); } catch (_) { return null; }
+}
+
 function summarize(trades) {
   const closed = trades.filter((t) => t.status === 'CLOSED');
   const open = trades.filter((t) => t.status === 'OPEN');
@@ -58,16 +63,20 @@ function buildDailyRecord(date, opts = {}) {
     wins: ps.wins + ls.wins,
     losses: ps.losses + ls.losses,
   };
-  // Keep the day's budget once known (the report path has no state to
-  // supply it, so it preserves whatever an earlier write stored).
+  // Keep the day's budget and mode once known (the report path has no
+  // state to supply them, so it preserves whatever an earlier write stored).
   let budget = opts.budget != null ? opts.budget : null;
-  if (budget == null) {
+  let mode = opts.mode != null ? opts.mode : null;
+  if (budget == null || mode == null) {
     try {
       const prev = JSON.parse(fs.readFileSync(dailyFile(date), 'utf8'));
-      if (prev && prev.budget != null) budget = prev.budget;
-    } catch (_) { /* no earlier file — budget stays null */ }
+      if (prev) {
+        if (budget == null && prev.budget != null) budget = prev.budget;
+        if (mode == null && prev.mode != null) mode = prev.mode;
+      }
+    } catch (_) { /* no earlier file — budget/mode stay null */ }
   }
-  return { date, generatedAt: new Date().toISOString(), budget, trades, summary: { paper: ps, live: ls, total } };
+  return { date, generatedAt: new Date().toISOString(), mode, budget, trades, summary: { paper: ps, live: ls, total } };
 }
 
 function writeDailyRecord(date, opts = {}) {
@@ -77,4 +86,4 @@ function writeDailyRecord(date, opts = {}) {
   return rec;
 }
 
-module.exports = { DAILY_DIR, dailyFile, buildDailyRecord, writeDailyRecord };
+module.exports = { DAILY_DIR, dailyFile, readDailyRecord, buildDailyRecord, writeDailyRecord };

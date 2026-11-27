@@ -10,6 +10,7 @@
   "scripts": {
     "login": "node tools/upstox-login.js",
     "start": "node tools/start.js",
+    "service": "node tools/start.js --service",
     "paper": "node tools/paper-report.js"
   },
   "dependencies": {

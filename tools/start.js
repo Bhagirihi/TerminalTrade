@@ -20,6 +20,8 @@
 // paper/v3-paper-trades.jsonl — both local, gitignored, never pushed.
 
 const readline = require('readline');
+const fs = require('fs');
+const path = require('path');
 const { upstoxCredentials, runInteractiveUpstoxLogin } = require('../src/upstox-auth');
 const { UpstoxApi } = require('../src/upstox-api');
 const { suggestAll, formatSuggestion, loadOptionBook, atmBandKeys, UNDERLYINGS } = require('../src/suggest');
@@ -28,7 +30,7 @@ const { indicatorValues } = require('../src/entry-rules');
 const { nearestStepStrike } = require('../src/strikes');
 const { loadPaperTrades, savePaperTrades, recordPaperTrade, hasOpenTradeFor, closePaperTrade } = require('../src/paper');
 const { loadLiveTrades, saveLiveTrades, recordLiveTrade, placeLiveEntry, syncLivePositions, exitLivePosition } = require('../src/trading');
-const { writeDailyRecord } = require('../src/daily');
+const { writeDailyRecord, readDailyRecord } = require('../src/daily');
 const { optionsNetPnl } = require('../src/charges');
 const { MarketFeed } = require('../src/market-feed');
 const { istDateKey, istParts, istTimeSecStr, istFullSecStr } = require('../src/time');
@@ -540,13 +542,82 @@ function daySummary(state) {
   return lines.join('\n');
 }
 
+
+// One loop per machine: a second start (interactive or service) refuses
+// while another is alive, so two loops can never trade the same day. A
+// lock whose pid is dead (crash, kill -9, power cut) is stale and is
+// taken over by the next start.
+const LOCK_FILE = path.join(__dirname, '..', 'v3-loop.lock');
+function acquireLock() {
+  try {
+    const pid = Number(fs.readFileSync(LOCK_FILE, 'utf8').trim());
+    if (Number.isFinite(pid) && pid > 0) {
+      try { process.kill(pid, 0); return { ok: false, pid }; } catch (_) { /* stale — take over */ }
+    }
+  } catch (_) { /* no lock file */ }
+  try { fs.writeFileSync(LOCK_FILE, String(process.pid)); } catch (e) { return { ok: false, error: e.message }; }
+  return { ok: true };
+}
+function releaseLock() { try { fs.unlinkSync(LOCK_FILE); } catch (_) { /* already gone */ } }
+
+// Derive today's budget state from the paper + live ledgers: spent is the
+// money already committed — open/expired trades at full entry cost, closed
+// trades at their realised loss (or minus their win) — and tradedToday
+// covers every contract traded today, open or closed, so a restart can
+// never re-enter a contract the day already traded.
+function deriveDayState(today, budget) {
+  const all = [
+    ...loadPaperTrades().filter((t) => t.date === today),
+    ...loadLiveTrades().filter((t) => t.date === today),
+  ];
+  let spent = 0;
+  const tradedToday = new Set();
+  let openCount = 0;
+  for (const t of all) {
+    tradedToday.add(`${t.ticker}|${t.expiry}`);
+    if (t.status === 'CLOSED') spent += -(Number(t.netPnl) || 0);
+    else { spent += Number(t.totalCost) || 0; if (t.status === 'OPEN') openCount += 1; }
+  }
+  spent = +spent.toFixed(2);
+  const remaining = budget != null ? Math.max(0, +(budget - spent).toFixed(2)) : null;
+  return { spent, remaining, tradedToday, tradedCount: all.length, openCount };
+}
+
+// Today's stored session (mode + budget) plus the ledger-derived state.
+// Null when the day has no daily record yet — the first run of the day.
+function loadDayState(today) {
+  const rec = readDailyRecord(today);
+  if (!rec || rec.mode == null || rec.budget == null) return null;
+  return { mode: rec.mode, budget: rec.budget, ...deriveDayState(today, rec.budget) };
+}
+
 async function main() {
+  // One loop per machine — see acquireLock above.
+  const lock = acquireLock();
+  if (!lock.ok) {
+    console.log(lock.pid
+      ? `Another V3 loop is already running (pid ${lock.pid}) — refusing to start a second one. Stop it first (tools/v3-service.sh stop) or wait for it to finish.`
+      : `Cannot take the loop lock: ${lock.error || 'unknown error'}.`);
+    process.exitCode = 1;
+    return;
+  }
+  try { await runMain(); } finally { releaseLock(); }
+}
+
+async function runMain() {
   const once = process.argv.includes('--once');
+  const service = process.argv.includes('--service');
+  const fresh = process.argv.includes('--fresh');
   let creds = upstoxCredentials();
   let api = new UpstoxApi(creds.accessToken);
   let check = await api.checkToken();
 
   if (!check.ok && check.reason !== 'error') {
+    if (service) {
+      console.log(`Upstox token ${check.reason === 'missing' ? 'missing from .env' : `expired (${check.detail})`} — service mode cannot log in. Log in once (npm run login); the watchdog will start the loop on its own after that.`);
+      process.exitCode = 1;
+      return;
+    }
     if (check.reason === 'missing') {
       console.log('No Upstox token in .env.');
     } else {
@@ -596,12 +667,38 @@ async function main() {
     return;
   }
 
-  const live = await askYesNo('Do you want Live trading?');
-  const mode = live ? 'LIVE' : 'PAPER';
-  const budget = await askBudget(funds ? funds.available : null);
-  if (budget != null) console.log(`Trading budget for today: ₹${inr(budget)}`);
+  const today = istDateKey(nowMs);
+
+  // Resume today's session when one exists: mode + budget come from the
+  // day's stored record, spent/left and the traded-today list from the
+  // ledgers — so a restart (or a service start) continues the day instead
+  // of resetting it. --fresh ignores the stored session and asks again.
+  let mode = null;
+  let budget = null;
+  let dayState = null;
+  if (!fresh) {
+    const restored = loadDayState(today);
+    if (restored) {
+      ({ mode, budget } = restored);
+      dayState = restored;
+      console.log(`Resuming today's ${mode} session — budget ₹${inr(budget)}, spent ₹${inr(restored.spent)}, left ₹${inr(restored.remaining)}, ${restored.tradedCount} trade(s) today (${restored.openCount} open).`);
+    }
+  }
+  if (mode == null) {
+    if (service) {
+      console.log('No session yet today — run `npm run start` once interactively to set the mode and budget, then the service will resume it on its own.');
+      process.exitCode = 1;
+      return;
+    }
+    const liveAns = await askYesNo('Do you want Live trading?');
+    mode = liveAns ? 'LIVE' : 'PAPER';
+    budget = await askBudget(funds ? funds.available : null);
+    if (budget != null) console.log(`Trading budget for today: ₹${inr(budget)}`);
+    dayState = deriveDayState(today, budget);
+  }
+  const live = mode === 'LIVE';
   // Funds line prints here (not earlier) so it can carry the trade fund
-  // — the budget you just entered.
+  // — the budget you just entered (or resumed).
   if (funds) {
     const total = funds.available + funds.used;
     console.log(`Upstox funds — available ₹${inr(funds.available)} · used ₹${inr(funds.used)} · total ₹${inr(total)}${budget != null ? ` · trade fund ₹${inr(budget)}` : ''}`);
@@ -611,8 +708,10 @@ async function main() {
   console.log(live
     ? 'LIVE mode — the loop will place real market orders (BUY + SL-M) when a setup appears, within your budget.'
     : 'Paper trading only — no live orders placed. Run `npm run paper` to see how they did.');
-
-  const today = istDateKey(nowMs);
+  // Store the session immediately (mode + budget) so a restart or a
+  // service start can resume from this moment on, even before the first
+  // trade of the day.
+  try { writeDailyRecord(today, { budget, mode }); } catch (_) { /* daily file is best-effort */ }
 
   // Realtime price feed (Upstox websocket v3). Best effort — if it never
   // connects, the loop falls back to REST LTP polling and keeps working.
@@ -659,8 +758,8 @@ async function main() {
   state = {
     mode,
     budget,
-    remaining: budget,
-    spent: 0,
+    remaining: dayState.remaining,
+    spent: dayState.spent,
     funds,
     indexLtps,
     feed,
@@ -668,7 +767,7 @@ async function main() {
       live: loadLiveTrades().filter((t) => t.status === 'OPEN' && t.date === today),
       paper: loadPaperTrades().filter((t) => t.status === 'OPEN' && t.date === today),
     },
-    tradedToday: new Set(),
+    tradedToday: dayState.tradedToday,
     creditedCloses: new Set(),
     lastBar: {},
     lastCards: {},
@@ -680,11 +779,6 @@ async function main() {
     printedLog: 0,
     lastRenderMs: 0,
   };
-  for (const t of [...state.positions.live, ...state.positions.paper]) {
-    state.tradedToday.add(`${t.ticker}|${t.expiry}`);
-    state.spent = +(state.spent + (Number(t.totalCost) || 0)).toFixed(2);
-    if (state.remaining != null) state.remaining = Math.max(0, +(state.remaining - (Number(t.totalCost) || 0)).toFixed(2));
-  }
   if (state.positions.live.length || state.positions.paper.length) {
     log(state, `Resumed ${state.positions.live.length} live + ${state.positions.paper.length} paper open position(s) from today.`);
     feed.subscribe([...state.positions.live, ...state.positions.paper].map((t) => t.instrumentKey));
@@ -747,4 +841,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { tick, enterTrade, monitorPositions, squareOffAll, checkPositionQuote, creditClose, noteClosedTrade, warmLiquidityBand, updateLiveValues, marketOpen, render, daySummary };
+module.exports = { tick, enterTrade, monitorPositions, squareOffAll, checkPositionQuote, creditClose, noteClosedTrade, warmLiquidityBand, updateLiveValues, marketOpen, render, daySummary, loadDayState, deriveDayState, acquireLock, releaseLock };

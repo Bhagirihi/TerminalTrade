@@ -4,3 +4,5 @@ node_modules/
 paper/
 live/
 daily/
+logs/
+v3-loop.lock
