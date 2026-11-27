@@ -9,7 +9,7 @@
 #
 #   start     — start the loop now (no-op if one is already running)
 #   watchdog  — start it if the market is open and none is running
-#   stop      — SIGTERM the service loop (it squares off, then exits)
+#   stop      — SIGTERM the running loop, service or hand-started (it squares off, then exits)
 #   status    — is it running? + the tail of today's log
 set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -63,16 +63,26 @@ do_watchdog() {
 }
 
 do_stop() {
-  if ! pgrep -f "$SERVICE_PATTERN" >/dev/null 2>&1; then
-    echo "V3 service loop is not running."
+  local pid
+  pid="$(running_pid)" || true
+  if [ -z "$pid" ]; then
+    echo "V3 loop is not running."
     return 0
   fi
-  pkill -TERM -f "$SERVICE_PATTERN"
+  if pgrep -f "$SERVICE_PATTERN" >/dev/null 2>&1; then
+    echo "Stopping the V3 service loop (pid $pid)..."
+  else
+    # A hand-started loop holds the same lockfile, so "stop" must end it
+    # too — the old service-only check reported "not running" while the
+    # loop was alive and every new start kept refusing.
+    echo "Stopping the V3 loop (pid $pid) — it was started by hand, not as a service."
+  fi
+  pkill -TERM -f "$LOOP_PATTERN"
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    pgrep -f "$SERVICE_PATTERN" >/dev/null 2>&1 || { echo "V3 service loop stopped."; return 0; }
+    is_running || { echo "V3 loop stopped."; return 0; }
     sleep 1
   done
-  echo "V3 service loop did not stop in 10s — check the log: $LOG"
+  echo "V3 loop did not stop in 10s — check the log: $LOG"
   return 1
 }
 

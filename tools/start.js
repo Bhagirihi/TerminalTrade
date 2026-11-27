@@ -607,13 +607,24 @@ function daySummary(state) {
 // One loop per machine: a second start (interactive or service) refuses
 // while another is alive, so two loops can never trade the same day. A
 // lock whose pid is dead (crash, kill -9, power cut) is stale and is
-// taken over by the next start.
+// taken over by the next start. A pid that answers but is not a V3 loop
+// is stale too — a zombie answers kill(pid, 0) with an empty cmdline, and
+// a pid reused by another program answers as well — so the cmdline must
+// read tools/start.js before a start is refused.
 const LOCK_FILE = path.join(__dirname, '..', 'v3-loop.lock');
+function lockPidIsLoop(pid) {
+  try {
+    const cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ');
+    return cmd.includes('tools/start.js');
+  } catch (_) {
+    return true; // no /proc (not Linux) — the alive check is all there is
+  }
+}
 function acquireLock() {
   try {
     const pid = Number(fs.readFileSync(LOCK_FILE, 'utf8').trim());
     if (Number.isFinite(pid) && pid > 0) {
-      try { process.kill(pid, 0); return { ok: false, pid }; } catch (_) { /* stale — take over */ }
+      try { process.kill(pid, 0); if (lockPidIsLoop(pid)) return { ok: false, pid }; } catch (_) { /* stale — take over */ }
     }
   } catch (_) { /* no lock file */ }
   try { fs.writeFileSync(LOCK_FILE, String(process.pid)); } catch (e) { return { ok: false, error: e.message }; }
@@ -916,4 +927,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { tick, enterTrade, monitorPositions, squareOffAll, checkPositionQuote, creditClose, noteClosedTrade, warmLiquidityBand, updateLiveValues, marketOpen, render, screenBlocks, positionLines, daySummary, loadDayState, deriveDayState, acquireLock, releaseLock, log, seedDayLog, logFileFor };
+module.exports = { tick, enterTrade, monitorPositions, squareOffAll, checkPositionQuote, creditClose, noteClosedTrade, warmLiquidityBand, updateLiveValues, marketOpen, render, screenBlocks, positionLines, daySummary, loadDayState, deriveDayState, acquireLock, releaseLock, lockPidIsLoop, log, seedDayLog, logFileFor };
