@@ -91,8 +91,34 @@ function marketOpen(nowMs) {
   return mins >= 9 * 60 && mins < CLOSE_MIN;
 }
 
+// Persistent day log: every log() line is also appended to
+// logs/v3-<IST date>.log (plain "HH:MM:SS msg" lines), and a restart
+// seeds state.log from that file's tail so the on-screen LOG box shows
+// the day's earlier lines instead of starting empty. In --service mode
+// stdout already lands in that file (the service script redirects it),
+// so log() skips the append there to avoid double lines.
+const LOG_DIR = path.join(__dirname, '..', 'logs');
+function logFileFor(date) { return path.join(LOG_DIR, `v3-${date}.log`); }
+function seedDayLog(state, today) {
+  try {
+    const raw = fs.readFileSync(logFileFor(today), 'utf8');
+    for (const line of raw.split('\n').filter(Boolean).slice(-100)) {
+      const m = line.match(/^(\d{2}:\d{2}:\d{2}) (.*)$/);
+      if (m) state.log.push({ time: m[1], msg: m[2] });
+    }
+    state.printedLog = state.log.length; // already on disk — don't re-print to stdout
+  } catch (_) { /* no log file yet — fresh day */ }
+}
+
 function log(state, msg) {
-  state.log.push({ time: istTimeSecStr(Date.now()), msg });
+  const time = istTimeSecStr(Date.now());
+  state.log.push({ time, msg });
+  if (state.logToFile) {
+    try {
+      fs.mkdirSync(LOG_DIR, { recursive: true });
+      fs.appendFileSync(logFileFor(istDateKey(Date.now())), `${time} ${msg}\n`);
+    } catch (_) { /* the in-memory log is the source of truth; disk is best-effort */ }
+  }
 }
 
 function positionLines(state) {
@@ -822,6 +848,12 @@ async function runMain() {
     printedLog: 0,
     lastRenderMs: 0,
   };
+  // In --service mode stdout already lands in the day log file (the
+  // service script redirects it), so only a hand-run loop appends from
+  // log() — and every restart seeds the on-screen LOG box from the
+  // file's tail, so the morning's lines survive a restart.
+  state.logToFile = !service;
+  seedDayLog(state, today);
   if (state.positions.live.length || state.positions.paper.length) {
     log(state, `Resumed ${state.positions.live.length} live + ${state.positions.paper.length} paper open position(s) from today.`);
     feed.subscribe([...state.positions.live, ...state.positions.paper].map((t) => t.instrumentKey));
@@ -884,4 +916,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { tick, enterTrade, monitorPositions, squareOffAll, checkPositionQuote, creditClose, noteClosedTrade, warmLiquidityBand, updateLiveValues, marketOpen, render, screenBlocks, positionLines, daySummary, loadDayState, deriveDayState, acquireLock, releaseLock };
+module.exports = { tick, enterTrade, monitorPositions, squareOffAll, checkPositionQuote, creditClose, noteClosedTrade, warmLiquidityBand, updateLiveValues, marketOpen, render, screenBlocks, positionLines, daySummary, loadDayState, deriveDayState, acquireLock, releaseLock, log, seedDayLog, logFileFor };
