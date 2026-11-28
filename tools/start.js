@@ -31,6 +31,7 @@ const { classifyRegime } = require('../src/regime');
 const { nearestStepStrike } = require('../src/strikes');
 const { loadPaperTrades, savePaperTrades, recordPaperTrade, hasOpenTradeFor, closePaperTrade } = require('../src/paper');
 const { loadLiveTrades, saveLiveTrades, recordLiveTrade, placeLiveEntry, syncLivePositions, exitLivePosition } = require('../src/trading');
+const { trailStop, effectiveSl, trailStep } = require('../src/trail');
 const { writeDailyRecord, readDailyRecord, latestDailyRecord } = require('../src/daily');
 const { optionsNetPnl } = require('../src/charges');
 const { MarketFeed } = require('../src/market-feed');
@@ -135,7 +136,8 @@ function positionLines(state) {
   if (!all.length) return out;
   for (const p of all) {
     const when = istShortDateTime(p.recordedAt);
-    let line = `${p.kind} ${p.ticker}${when ? ` · ${when}` : ''} — ${p.lots} lot${p.lots > 1 ? 's' : ''} @ ₹${p.entry}, SL ₹${p.sl}, T1 ₹${p.t1}, T2 ₹${p.t2}`;
+    const effSl = effectiveSl(p);
+    let line = `${p.kind} ${p.ticker}${when ? ` · ${when}` : ''} — ${p.lots} lot${p.lots > 1 ? 's' : ''} @ ₹${p.entry}, SL ₹${effSl}${effSl > p.sl ? ' (trail)' : ''}, T1 ₹${p.t1}, T2 ₹${p.t2}`;
     if (Number.isFinite(p.liveLtp)) {
       const { gross, net } = optionsNetPnl(p.qty, p.entry, p.liveLtp);
       line += ` — live ₹${p.liveLtp}, P&L gross ₹${inr(gross)} / net ₹${inr(net)}${p.t1Hit ? ' (T1 hit)' : ''}`;
@@ -209,6 +211,8 @@ async function enterTrade(state, api, s, nowMs) {
       sl: s.card.sl,
       t1: s.card.t1,
       t2: s.card.t2,
+      peak: s.card.ltp,
+      trailStep: 0,
       costPerLot: s.card.costPerLot,
       totalCost: s.card.totalCost,
       maxLoss: s.card.maxLoss,
@@ -243,6 +247,8 @@ async function enterTrade(state, api, s, nowMs) {
       sl: placed.sl,
       t1: placed.t1,
       t2: placed.t2,
+      peak: placed.entry,
+      trailStep: 0,
       costPerLot: +(placed.entry * s.card.lot).toFixed(2),
       totalCost: +(placed.entry * s.card.qty).toFixed(2),
       maxLoss: +(placed.entry * s.card.qty * 0.05).toFixed(2),
@@ -322,10 +328,28 @@ async function checkPositionQuote(state, api, pos, kind, ltp, nowMs) {
       return cur || t;
     }));
   };
+  // Trailing stop (reading B): the peak is the highest premium since
+  // entry; once it is 5% up, the stop trails 5% behind it, floored at
+  // breakeven, and only ever moves up. The peak is persisted so a
+  // restart resumes the trail instead of resetting it.
+  if (Number.isFinite(ltp)) {
+    const peak = pos.peak != null ? pos.peak : pos.entry;
+    if (ltp > peak) {
+      pos.peak = ltp;
+      const step = trailStep(pos.entry, pos.peak);
+      if (step > (pos.trailStep || 0)) {
+        pos.trailStep = step;
+        log(state, `${kind} ${pos.ticker} trail stop up to ₹${effectiveSl(pos)} (peak ₹${pos.peak})`);
+      }
+      try { saveLedger(); } catch (_) { /* peak persists on the next save */ }
+    }
+  }
+  const effStop = effectiveSl(pos);
   if (kind === 'PAPER') {
-    if (ltp <= pos.sl) {
-      closePaperTrade(pos, pos.sl, 'SL', nowMs);
-      log(state, `PAPER ${pos.ticker} closed SL @ ₹${pos.exit} — net ₹${inr(pos.netPnl)}`);
+    if (ltp <= effStop) {
+      const reason = effStop > pos.sl ? 'TRAIL' : 'SL';
+      closePaperTrade(pos, effStop, reason, nowMs);
+      log(state, `PAPER ${pos.ticker} closed ${reason} @ ₹${pos.exit} — net ₹${inr(pos.netPnl)}`);
       saveLedger();
       noteClosedTrade(state, pos);
       maybeUnsubscribe(state, pos.instrumentKey);
@@ -354,6 +378,26 @@ async function checkPositionQuote(state, api, pos, kind, ltp, nowMs) {
       }
     } catch (e) {
       log(state, `LIVE ${pos.ticker} T2 exit FAILED: ${e.message || e} — position still open`);
+      pos.exiting = false;
+    }
+  } else if (ltp <= effStop && effStop > pos.sl) {
+    // Trailing stop (armed): sell at market after cancelling the SL-M.
+    // The broker SL-M stays at the fixed level as the backstop if the
+    // loop dies — V3 has no order-modify call to move it.
+    pos.exiting = true;
+    try {
+      const r = await exitLivePosition(api, pos, 'TRAIL', effStop);
+      if (r.ok) {
+        log(state, `LIVE ${pos.ticker} closed TRAIL @ ₹${r.exit} — net ₹${inr(pos.netPnl)}`);
+        saveLedger();
+        noteClosedTrade(state, pos);
+        maybeUnsubscribe(state, pos.instrumentKey);
+      } else {
+        log(state, `LIVE ${pos.ticker} TRAIL exit skipped: ${r.reason}`);
+        pos.exiting = false;
+      }
+    } catch (e) {
+      log(state, `LIVE ${pos.ticker} TRAIL exit FAILED: ${e.message || e} — position still open`);
       pos.exiting = false;
     }
   } else if (ltp <= pos.sl && !pos.slmOrderId) {
